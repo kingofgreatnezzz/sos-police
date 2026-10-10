@@ -1,0 +1,30 @@
+# =============================================================================
+#  Emergency Response and SOS Location Tracking System
+#  Nigeria Police Force - Enugu State Command
+#
+#  Install with:   pip install -r requirements.txt
+#  All packages are free / open-source. SQLite and hashlib are part of the
+#  Python standard library and need no installation.
+# =============================================================================
+
+# --- Web application framework (the police command dashboard) ----------------
+streamlit>=1.37,<2.0
+
+# --- Data handling / tables ---------------------------------------------------
+pandas>=2.0
+
+# --- Interactive maps ---------------------------------------------------------
+folium>=0.15
+streamlit-folium>=0.18
+
+# --- Transitive dependencies pinned loosely for reproducible installs --------
+# (installed automatically, listed here for transparency)
+#   numpy          - required by pandas
+#   jinja2         - required by folium
+#   branca         - required by folium
+#   requests       - required by folium (tile fetching)
+#   pillow         - required by streamlit
+#   pyarrow        - required by streamlit dataframes
+#   altair         - required by streamlit charts
+#   tornado        - required by streamlit server
+#   protobuf       - required by streamlit

@@ -1,0 +1,24 @@
+[theme]
+# Nigeria Police Force command theme - navy, gold and neutral grey.
+primaryColor = "#0b2545"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f4f6f9"
+textColor = "#102027"
+font = "sans serif"
+
+[server]
+port = 8501
+headless = true
+fileWatcherType = "auto"
+maxUploadSize = 20
+
+[browser]
+gatherUsageStats = false
+
+[client]
+showErrorDetails = true
+toolbarMode = "minimal"
+
+[runner]
+magicEnabled = true
+fastReruns = true
