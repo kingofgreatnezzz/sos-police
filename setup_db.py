@@ -148,36 +148,42 @@ SEED_PATROL_UNITS = [
 
 # (citizen, phone, lat, lon, type, description, status, assigned_callsign,
 #  created_minutes_ago, resolved_minutes_after_creation)
+#
+# NOTE ON TIMINGS: every seeded alert is deliberately made OLDER than
+# ALARM_FRESH_MINUTES (5 minutes, defined in app.py).  The police dashboard
+# rings only for a genuinely new arrival, so an officer signing in must NOT
+# trigger the alarm - otherwise the control room would start ringing the
+# moment the application is opened.
 SEED_SOS_ALERTS = [
     (
         "Chief Anthony Nwankwo", "08034567890", 6.4471, 7.5098, "Armed Robbery",
         "Four armed men on two motorcycles are robbing a provision store at "
         "Ogui Road. They are shooting sporadically. Traders are running for safety.",
-        "Active", None, 6, None,
+        "Active", None, 26, None,
     ),
     (
         "Mrs. Blessing Eze", "08127784512", 6.4623, 7.4721, "Accident",
         "A commercial bus has somersaulted along the Enugu-Onitsha Expressway "
         "by Ogbaku Junction. Two passengers are trapped inside the vehicle.",
-        "Dispatched", "PATROL-03-TRANS-EKULU", 21, None,
+        "Dispatched", "PATROL-03-TRANS-EKULU", 41, None,
     ),
     (
         "Mr. Ifeanyi Obi", "07061239876", 6.4389, 7.4967, "Medical",
         "My neighbour collapsed at No. 14 Nza Street, Independence Layout. "
         "He is diabetic and unconscious. We need an ambulance urgently.",
-        "Resolved", None, 38, 12,
+        "Resolved", None, 52, 12,
     ),
     (
         "Miss Chiamaka Agu", "08099887766", 6.8551, 7.3908, "Kidnapping",
         "Unknown persons in a tinted Sienna bus forcefully pushed my younger "
         "brother into the vehicle around Odenigbo Junction, Nsukka.",
-        "Resolved", "PATROL-05-NSUKKA", 44, 26,
+        "Resolved", "PATROL-05-NSUKKA", 58, 26,
     ),
     (
         "Mr. Peter Nnamdi", "08156674321", 6.4275, 7.4869, "Other",
         "Some youths are fighting at the motor park. It may just be a dispute "
         "over park levy. Please confirm before sending a team.",
-        "False Alarm", None, 33, 9,
+        "False Alarm", None, 47, 9,
     ),
 ]
 

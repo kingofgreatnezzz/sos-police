@@ -62,27 +62,46 @@ def goto(at: AppTest, page: str) -> None:
     at.run()
 
 
+def sign_in(at: AppTest, username: str, password: str) -> None:
+    """
+    Complete the police sign-in form.
+
+    The submit button is located by its label because the two mode-switch
+    buttons at the very top of the page also appear in the button list.
+    """
+    at.text_input[0].set_value(username)
+    at.text_input[1].set_value(password)
+    for button in at.button:
+        if "Sign in" in str(button.label):
+            button.click().run()
+            return
+    raise AssertionError("The 'Sign in' button was not found on the login page.")
+
+
 def main() -> int:
     total = 0
 
-    print("== 1. login page ==")
+    print("== 1. police login page ==")
     at = AppTest.from_file(APP_FILE, default_timeout=120)
+    at.session_state["app_mode"] = "👮 Police Command"
     at.run()
     total += report(at, "login page")
 
     print("\n== 2. rejected login ==")
     at.text_input[0].set_value("commander")
     at.text_input[1].set_value("wrong-password")
-    at.button[0].click().run()
+    for button in at.button:
+        if "Sign in" in str(button.label):
+            button.click().run()
+            break
     errors = [str(e.value) for e in at.error]
     print(f"  [rejected] errors={len(errors)} -> {errors[:1]}")
     if not errors or "Invalid username or password" not in errors[0]:
+        total += 1
         print("      FAIL: an invalid password was not rejected")
 
     print("\n== 3. successful admin login ==")
-    at.text_input[0].set_value("commander")
-    at.text_input[1].set_value("npf123")
-    at.button[0].click().run()
+    sign_in(at, "commander", "npf123")
     total += report(at, "admin login")
 
     print("\n== 4. every page as Admin / Commander ==")

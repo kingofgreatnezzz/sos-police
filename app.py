@@ -24,8 +24,11 @@ DEFAULT ACCOUNTS
 from __future__ import annotations
 
 import html as html_lib
+import json
 import random
+import time
 from datetime import datetime, timedelta
+from typing import Any, Optional
 
 import folium
 import pandas as pd
@@ -37,6 +40,7 @@ import auth
 import db
 import haversine
 import reports
+import sounds
 
 # =================================================================================
 # 1. PAGE CONFIGURATION  (must be the first Streamlit call in the script)
@@ -107,7 +111,7 @@ TYPE_ICON = {
     "Other": "📞",
 }
 
-MAP_REFRESH_SECONDS = 5
+MAP_REFRESH_SECONDS = 3
 ENUGU_CENTER = [haversine.ENUGU_CENTER_LAT, haversine.ENUGU_CENTER_LON]
 DEFAULT_SPEED_KMH = 40.0
 
@@ -2620,7 +2624,1264 @@ def page_users() -> None:
 
 
 # =================================================================================
-# 16. NAVIGATION & APPLICATION ENTRY POINT
+# 16. TWO-MODE ARCHITECTURE
+# ---------------------------------------------------------------------------------
+# The SAME Streamlit script now serves TWO completely different front ends, and
+# both of them read from and write to the SAME SQLite file (data/sos_emergency.db):
+#
+#   MODE 1 - CITIZEN SOS APP      -> no login. A mobile-shaped panic-button page.
+#                                    Writes a new row into sos_alerts (status
+#                                    'Active') using the citizen's GPS position.
+#
+#   MODE 2 - POLICE COMMAND       -> the existing control-room dashboard, behind
+#                                    the commander/dispatcher login. Polls the
+#                                    database every 3 seconds, and RINGS LOUDLY
+#                                    the moment a new ACTIVE alert appears.
+#
+# Switching is held in st.session_state["app_mode"] and mirrored into the URL
+# query string (?mode=citizen / ?mode=police) so that the two modes can be
+# opened side by side in two browser tabs - or on a laptop and a phone -
+# and each tab keeps its own mode across a refresh.
+# =================================================================================
+
+MODE_CITIZEN = "🚨 Citizen SOS App"
+MODE_POLICE = "👮 Police Command"
+APP_MODES = [MODE_CITIZEN, MODE_POLICE]
+
+#: How often the police dashboard polls the database for new SOS alerts.
+ALARM_REFRESH_SECONDS = 3
+
+#: An alert younger than this (in minutes) always rings, even if it was created
+#: before the officer signed in - which covers the case where the citizen sends
+#: the SOS first and the officer logs in a moment later.
+ALARM_FRESH_MINUTES = 5
+
+#: How long the "test alarm" diagnostic sounds for.
+ALARM_TEST_SECONDS = 8
+
+
+# ---------------------------------------------------------------------------------
+# Mode switching
+# ---------------------------------------------------------------------------------
+def _mode_from_query() -> Optional[str]:
+    """Read the requested mode from the URL query string, if present."""
+    try:
+        requested = str(st.query_params.get("mode") or "").strip().lower()
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+    if requested in ("citizen", "sos", "citizen-sos"):
+        return MODE_CITIZEN
+    if requested in ("police", "command", "dashboard", "police-command"):
+        return MODE_POLICE
+    return None
+
+
+def get_app_mode() -> str:
+    """
+    Return the active mode, defaulting to the Police Command dashboard.
+
+    A ``?mode=`` query parameter always wins on a fresh session, which is what
+    makes it easy to open the citizen app on a phone by simply typing a URL.
+    """
+    if "app_mode" not in st.session_state:
+        st.session_state["app_mode"] = _mode_from_query() or MODE_POLICE
+    return st.session_state["app_mode"]
+
+
+def set_app_mode(mode: str) -> None:
+    """Switch modes and mirror the choice into the URL query string."""
+    st.session_state["app_mode"] = mode
+    try:
+        wanted = "citizen" if mode == MODE_CITIZEN else "police"
+        if str(st.query_params.get("mode") or "") != wanted:
+            st.query_params["mode"] = wanted
+    except Exception:  # pragma: no cover - query params are a convenience only
+        pass
+
+
+MODE_SWITCH_CSS = """
+<style>
+    .mode-brand {
+        background: linear-gradient(120deg, #0b2545 0%, #13315c 55%, #1b4079 100%);
+        border-radius: 12px; padding: 13px 20px; margin-bottom: 10px;
+        border-left: 6px solid #ffd54f; box-shadow: 0 4px 14px rgba(11,37,69,.25);
+        display: flex; align-items: center; justify-content: space-between;
+        flex-wrap: wrap; gap: 8px;
+    }
+    .mode-brand .title { color: #ffffff; font-size: 17px; font-weight: 700; letter-spacing: .3px; }
+    .mode-brand .sub { color: #b8c7dc; font-size: 11.5px; letter-spacing: .5px; margin-top: 2px; }
+    .mode-brand .chip {
+        font-size: 11px; font-weight: 700; padding: 3px 12px; border-radius: 11px;
+        letter-spacing: .6px; background: #ffd54f; color: #0b2545;
+    }
+    .mode-brand .chip.police { background: #90caf9; color: #0b2545; }
+    div[data-testid="stSegmentedControl"] button p { font-size: 14px; font-weight: 600; }
+</style>
+"""
+
+
+def render_mode_switcher() -> str:
+    """
+    Draw the mode switcher at the very top of the page (before any login) and
+    return the mode that is now active.
+    """
+    st.markdown(MODE_SWITCH_CSS, unsafe_allow_html=True)
+
+    current = get_app_mode()
+    is_citizen = current == MODE_CITIZEN
+
+    chip_class = "chip" if is_citizen else "chip police"
+    chip_text = "CITIZEN VIEW · NO LOGIN" if is_citizen else "COMMAND VIEW · STAFF ONLY"
+
+    st.markdown(
+        f"""
+        <div class="mode-brand">
+            <div>
+                <div class="title">🚨 Emergency Response &amp; SOS Location Tracking System</div>
+                <div class="sub">NIGERIA POLICE FORCE · ENUGU STATE COMMAND</div>
+            </div>
+            <div class="{chip_class}">{chip_text}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # A pair of large buttons acts as the mode switch.  Buttons are used
+    # deliberately: they behave identically on every Streamlit version, on
+    # desktop and on a phone touch screen, and the active mode is obvious
+    # because it is drawn as the primary (filled) button.
+    switch_left, switch_right = st.columns(2)
+    with switch_left:
+        if st.button("🚨  CITIZEN SOS", key="mode_btn_citizen",
+                     type="primary" if is_citizen else "secondary", **FULL_WIDTH):
+            if not is_citizen:
+                set_app_mode(MODE_CITIZEN)
+                st.session_state["page"] = None
+                st.rerun()
+    with switch_right:
+        if st.button("👮  POLICE COMMAND", key="mode_btn_police",
+                     type="primary" if not is_citizen else "secondary", **FULL_WIDTH):
+            if is_citizen:
+                set_app_mode(MODE_POLICE)
+                st.rerun()
+
+    if is_citizen:
+        st.caption(
+            "You are in the **Citizen SOS** view — no login required. Citizens use this "
+            "page on their phone to send a distress call. Switch to **Police Command** "
+            "for the control-room dashboard."
+        )
+    else:
+        st.caption(
+            "You are in the **Police Command** view — the control-room dashboard. Staff "
+            "sign-in is required. Switch to **Citizen SOS** to see what the citizen sees "
+            "on their phone."
+        )
+
+    return current
+
+
+# ---------------------------------------------------------------------------------
+# Small shared helpers used by both modes
+# ---------------------------------------------------------------------------------
+def parse_utc(value: Any) -> Optional[datetime]:
+    """Parse a stored SQLite UTC timestamp into a ``datetime``."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def alert_age_minutes(value: Any) -> float:
+    """Age of an alert in minutes (9999 when the timestamp cannot be read)."""
+    stamp = parse_utc(value)
+    if stamp is None:
+        return 9999.0
+    return max(0.0, (datetime.utcnow() - stamp).total_seconds() / 60.0)
+
+
+def sound_bytes(which: str) -> bytes:
+    """Return a generated WAV file as bytes, cached in the session."""
+    key = f"_sound_bytes_{which}"
+    if key not in st.session_state:
+        st.session_state[key] = sounds.read_sound_bytes(which)
+    return st.session_state[key]
+
+
+def kick_html_audio() -> None:
+    """
+    Nudge any audio element in the page to play.
+
+    Browsers block sound until the user has interacted with the page (Chrome's
+    autoplay policy).  An officer has already clicked 'Sign in', so the document
+    has "sticky activation" and playback is allowed - but calling ``play()``
+    explicitly makes the alarm far more reliable, especially in the iframe that
+    a Streamlit component renders in.
+    """
+    components.html(
+        """
+        <script>
+        (function () {
+            try {
+                var doc = window.parent.document;
+                function kick() {
+                    var players = doc.querySelectorAll('audio');
+                    for (var i = 0; i < players.length; i++) {
+                        var a = players[i];
+                        a.loop = true;
+                        a.volume = 1.0;
+                        var p = a.play();
+                        if (p && p.catch) { p.catch(function () {}); }
+                    }
+                }
+                kick();
+                setTimeout(kick, 350);
+                setTimeout(kick, 1200);
+            } catch (e) { /* never let sound break the alert */ }
+        })();
+        </script>
+        """,
+        height=0,
+    )
+
+
+# =================================================================================
+# 17. MODE 1 — THE CITIZEN SOS APP (mobile view, no login)
+# =================================================================================
+CITIZEN_CSS = """
+<style>
+    /* ---- mobile phone frame ------------------------------------------------- */
+    .block-container { max-width: 640px !important; padding: 0.5rem 1rem 3rem 1rem !important; }
+    header[data-testid="stHeader"] { display: none !important; }
+    section[data-testid="stSidebar"],
+    div[data-testid="stSidebarCollapsedControl"] { display: none !important; }
+    #MainMenu, footer { visibility: hidden; }
+
+    /* ---- compact app header ------------------------------------------------- */
+    .ci-head {
+        background: linear-gradient(140deg, #0b2545 0%, #13315c 55%, #1b4079 100%);
+        border-radius: 0 0 20px 20px; padding: 12px 18px 15px 18px; text-align: center;
+        box-shadow: 0 6px 18px rgba(11,37,69,.32); margin-bottom: 12px;
+    }
+    .ci-head .crest { font-size: 26px; line-height: 1; }
+    .ci-head h2 { color: #fff; font-size: 15.5px; margin: 5px 0 2px 0; font-weight: 700; }
+    .ci-head .sub { color: #b8c7dc; font-size: 10.5px; letter-spacing: .6px; }
+
+    /* ---- section cards ------------------------------------------------------ */
+    .ci-card {
+        background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px;
+        padding: 14px 16px; margin-bottom: 12px; box-shadow: 0 2px 8px rgba(16,39,57,.06);
+    }
+    .ci-card .ci-step,
+    .ci-step {
+        font-size: 11px; font-weight: 800; color: #0b2545; letter-spacing: 1px;
+        text-transform: uppercase; margin-bottom: 6px;
+    }
+    .ci-prompt {
+        font-size: 15px; font-weight: 700; color: #102027; text-align: center;
+        margin: 2px 0 9px 0;
+    }
+    .ci-hint {
+        font-size: 12.5px; color: #546e7a; text-align: center;
+        margin: 10px 4px 14px 4px; line-height: 1.5;
+    }
+
+    /* ---- THE PANIC BUTTON --------------------------------------------------- */
+    .st-key-sos_panic_button button {
+        width: 100% !important; height: 200px !important; border-radius: 999px !important;
+        background: radial-gradient(circle at 50% 28%, #ff7b7b 0%, #ef5350 28%,
+                    #c62828 62%, #7f0000 100%) !important;
+        color: #ffffff !important; font-size: 29px !important; font-weight: 900 !important;
+        letter-spacing: 2.5px !important; line-height: 1.2 !important;
+        border: 10px solid rgba(255,255,255,.92) !important;
+        text-shadow: 0 3px 8px rgba(0,0,0,.45) !important;
+        animation: sosPulse 1.6s infinite !important;
+        margin: 0;
+    }
+    .st-key-sos_panic_button button:hover { filter: brightness(1.08); }
+    .st-key-sos_panic_button button:active { transform: scale(.97); }
+    @keyframes sosPulse {
+        0%   { box-shadow: 0 0 0 0 rgba(229,57,53,.55), 0 12px 30px rgba(0,0,0,.35); }
+        70%  { box-shadow: 0 0 0 36px rgba(229,57,53,0), 0 12px 30px rgba(0,0,0,.35); }
+        100% { box-shadow: 0 0 0 0 rgba(229,57,53,0), 0 12px 30px rgba(0,0,0,.35); }
+    }
+
+    /* ---- the three one-tap categories --------------------------------------- */
+    .st-key-citizen_quick_0 button,
+    .st-key-citizen_quick_1 button,
+    .st-key-citizen_quick_2 button {
+        height: 86px !important; font-size: 14.5px !important; font-weight: 700 !important;
+        white-space: normal !important; line-height: 1.3 !important;
+        border-radius: 14px !important; padding: 6px 4px !important;
+    }
+
+    /* ---- success screen ----------------------------------------------------- */
+    .ci-success {
+        background: linear-gradient(150deg, #1b5e20 0%, #2e7d32 55%, #43a047 100%);
+        border-radius: 18px; padding: 26px 22px; text-align: center; color: #fff;
+        box-shadow: 0 10px 26px rgba(27,94,32,.35); margin-bottom: 16px;
+    }
+    .ci-success .big { font-size: 54px; line-height: 1; }
+    .ci-success h2 { color: #fff; font-size: 24px; margin: 12px 0 6px 0; font-weight: 800; }
+    .ci-success p { color: #dcedc8; font-size: 14px; margin: 4px 0 0 0; }
+
+    .ci-track {
+        background: #ffffff; border: 1px solid #e2e8f0; border-left: 6px solid #0b2545;
+        border-radius: 12px; padding: 14px 16px; margin-bottom: 10px;
+    }
+    .ci-track .label { font-size: 11px; letter-spacing: 1px; color: #78909c;
+                       text-transform: uppercase; font-weight: 700; }
+    .ci-track .value { font-size: 16px; font-weight: 700; color: #102027; margin-top: 3px; }
+
+    .ci-note { font-size: 12.5px; color: #546e7a; text-align: center; margin-top: 10px; }
+</style>
+"""
+
+#: The THREE one-tap choices on the citizen screen, in priority order.
+#:
+#: (icon, button label, value stored in sos_alerts.emergency_type, phrase used
+#:  in the description)
+#:
+#: A frightened caller must be able to raise an alarm in one press, so only
+#: three broad choices are offered - and none of them is compulsory.  They map
+#: onto the five values the database CHECK constraint accepts, which keeps the
+#: police register fully classified, while the caller's own words are always
+#: preserved in the description so nothing is lost if an officer reclassifies
+#: the incident later.
+CITIZEN_QUICK_CATEGORIES = [
+    ("🔫", "Robbery / Theft", "Armed Robbery",
+     "robbery, theft or armed attack"),
+    ("🥊", "Fight / Attack", "Other",
+     "fight, assault or physical attack"),
+    ("🚑", "Health Emergency", "Medical",
+     "medical emergency - someone is ill or injured"),
+]
+
+
+def _citizen_defaults() -> None:
+    """Seed the citizen form fields the first time the page is opened."""
+    # NOTE ON WHY THE SAVED_* KEYS EXIST
+    # Widget values live under the widget's own key, and Streamlit discards that
+    # state if the widget is not rendered during a run.  Pressing the SOS button
+    # ends its run with st.rerun() *before* the inputs further down the page are
+    # drawn, so those inputs would be reset.  Copying the caller's details into
+    # ordinary (non-widget) keys lets them survive and be offered again for a
+    # second SOS from the same phone.
+    st.session_state.setdefault("citizen_saved_name", "")
+    st.session_state.setdefault("citizen_saved_phone", "")
+
+    st.session_state.setdefault("citizen_name", st.session_state["citizen_saved_name"])
+    st.session_state.setdefault("citizen_phone", st.session_state["citizen_saved_phone"])
+    st.session_state.setdefault("citizen_note", "")
+    #: Index into CITIZEN_QUICK_CATEGORIES, or None for "not specified".
+    #: None is perfectly acceptable - the SOS button works without a choice.
+    st.session_state.setdefault("citizen_quick", None)
+    st.session_state.setdefault("citizen_lat", float(haversine.ENUGU_CENTER_LAT))
+    st.session_state.setdefault("citizen_lon", float(haversine.ENUGU_CENTER_LON))
+    st.session_state.setdefault("citizen_gps_note", "")
+
+
+def _citizen_pick_category(index: int) -> None:
+    """
+    ``on_click`` callback for the one-tap emergency category chips.
+
+    A callback is used rather than ``if st.button(...): ... st.rerun()`` on
+    purpose.  An explicit ``st.rerun()`` aborts the current run at that point,
+    which would prevent every widget further down the page from being rendered -
+    and Streamlit would then discard whatever the caller had already typed into
+    them.  Callbacks run *before* the page is drawn, so nothing is lost.
+    """
+    st.session_state["citizen_quick"] = (
+        None if st.session_state.get("citizen_quick") == index else index
+    )
+
+
+def _citizen_use_simulated_location() -> None:
+    """``on_click`` callback: drop the caller at Ogui Road, Enugu."""
+    st.session_state["citizen_lat"] = 6.4521
+    st.session_state["citizen_lon"] = 7.5089
+    st.session_state["citizen_gps_note"] = (
+        "📍 Simulated location applied: Ogui Road, Enugu (6.452100, 7.508900)"
+    )
+
+
+def _consume_citizen_query_params() -> None:
+    """
+    Pick up the coordinates that the browser's GPS button put into the URL.
+
+    The geolocation API only exists in JavaScript, so the mobile page hands the
+    position back to Python by reloading the app with ``?lat=..&lon=..`` in the
+    query string.  This function reads those values (exactly once per distinct
+    position) and drops them into the form.
+    """
+    try:
+        params = st.query_params
+        latitude = params.get("lat")
+        longitude = params.get("lon")
+    except Exception:  # pragma: no cover - defensive
+        return
+
+    if latitude and longitude:
+        token = f"{latitude}|{longitude}"
+        if token != st.session_state.get("_citizen_gps_token"):
+            try:
+                st.session_state["_citizen_gps_token"] = token
+                st.session_state["citizen_lat"] = float(latitude)
+                st.session_state["citizen_lon"] = float(longitude)
+                st.session_state["citizen_gps_note"] = (
+                    f"📡 GPS captured from this device: "
+                    f"{float(latitude):.6f}, {float(longitude):.6f}"
+                )
+            except (TypeError, ValueError):
+                pass
+
+    # Carry the typed-in details across the reload as well.
+    for query_key, state_key in (("name", "citizen_name"),
+                                 ("phone", "citizen_phone"),
+                                 ("etype", "citizen_type")):
+        try:
+            value = params.get(query_key)
+        except Exception:  # pragma: no cover
+            value = None
+        if not value:
+            continue
+        if value == st.session_state.get(f"_qp_{query_key}"):
+            continue
+        st.session_state[f"_qp_{query_key}"] = value
+        if state_key == "citizen_type" and value not in EMERGENCY_TYPES:
+            continue
+        st.session_state[state_key] = value
+
+
+def _geolocation_panel() -> None:
+    """
+    Render the "read my GPS" panel.
+
+    This is a small HTML component because ``navigator.geolocation`` only exists
+    in JavaScript.  The button inside it obtains the fix and then reloads the
+    top-level page with the coordinates in the query string.
+    """
+    name_js = json.dumps(str(st.session_state.get("citizen_name") or ""))
+    phone_js = json.dumps(str(st.session_state.get("citizen_phone") or ""))
+    type_js = json.dumps(str(st.session_state.get("citizen_type") or ""))
+
+    components.html(
+        f"""
+        <div style="font-family:'Segoe UI',Arial,sans-serif">
+          <div style="font-size:12.5px;color:#546e7a;margin-bottom:8px" id="geoStatus">
+            Tap the button to read the coordinates from this phone's GPS receiver.
+          </div>
+          <button id="geoBtn" style="
+              width:100%; padding:13px 16px; border-radius:10px; cursor:pointer;
+              border:1px solid #0b2545; background:#ffffff; color:#0b2545;
+              font-size:14.5px; font-weight:700; font-family:inherit;">
+            📡 Detect My GPS Location
+          </button>
+        </div>
+        <script>
+        (function () {{
+            var NAME = {name_js}, PHONE = {phone_js}, ETYPE = {type_js};
+            var status = document.getElementById('geoStatus');
+            document.getElementById('geoBtn').onclick = function () {{
+                if (!navigator.geolocation) {{
+                    status.textContent = 'This browser does not support GPS. Use the simulated Enugu location below.';
+                    return;
+                }}
+                status.textContent = 'Reading GPS fix... please tap ALLOW if your browser asks.';
+                navigator.geolocation.getCurrentPosition(function (pos) {{
+                    var la = pos.coords.latitude.toFixed(6);
+                    var lo = pos.coords.longitude.toFixed(6);
+                    status.textContent = 'GPS fix found: ' + la + ', ' + lo + ' — sending to the app...';
+                    var q = new URLSearchParams();
+                    q.set('mode', 'citizen');
+                    q.set('lat', la);
+                    q.set('lon', lo);
+                    q.set('gps', '1');
+                    if (NAME)  {{ q.set('name', NAME); }}
+                    if (PHONE) {{ q.set('phone', PHONE); }}
+                    if (ETYPE) {{ q.set('etype', ETYPE); }}
+                    window.parent.location.href =
+                        window.parent.location.pathname + '?' + q.toString();
+                }}, function (err) {{
+                    status.textContent = 'GPS unavailable (' + err.message +
+                        '). Please tap "Use Simulated Enugu Location" instead.';
+                }}, {{ enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }});
+            }};
+        }})();
+        </script>
+        """,
+        height=105,
+    )
+
+
+def _citizen_form_screen() -> None:
+    """The main panic-button screen."""
+    _citizen_defaults()
+    _consume_citizen_query_params()
+
+    # ---------------- validation errors from the previous attempt ----------
+    for message in st.session_state.pop("citizen_errors", []):
+        st.error(f"⛔ {message}")
+
+    # ==================================================================
+    #  DESIGN RULE: the victim is frightened and in a hurry.
+    #  Nothing on this screen may be required.  The page is therefore
+    #  ordered as
+    #      1. one optional one-tap category  (three choices, not a form)
+    #      2. THE BIG RED BUTTON            (above the fold, works alone)
+    #      3. everything else               (optional, AFTER the button)
+    # ==================================================================
+
+    # ---------------- OPTIONAL: one-tap category ---------------------------
+    quick = st.session_state.get("citizen_quick")
+    st.markdown(
+        "<div class='ci-prompt'>What is happening? "
+        "<span style='font-weight:400;color:#78909c'>(optional — tap one, or just press SOS)</span></div>",
+        unsafe_allow_html=True,
+    )
+
+    quick_columns = st.columns(3)
+    for index, (icon, label, _db_type, _phrase) in enumerate(CITIZEN_QUICK_CATEGORIES):
+        with quick_columns[index]:
+            is_selected = quick == index
+            st.button(
+                f"{icon} {label}",
+                key=f"citizen_quick_{index}",
+                type="primary" if is_selected else "secondary",
+                on_click=_citizen_pick_category,
+                args=(index,),
+                **FULL_WIDTH,
+            )
+
+    # ---------------- THE PANIC BUTTON (nothing required above it) ---------
+    st.markdown("<div style='height:10px'></div>", unsafe_allow_html=True)
+
+    if st.button("🚨  SOS  EMERGENCY", key="sos_panic_button", **FULL_WIDTH):
+        _submit_citizen_sos()
+        st.rerun()
+
+    st.markdown(
+        "<div class='ci-hint'>Press the button — that is all you have to do. "
+        "Your position is sent automatically and help is on the way. "
+        "You can add your name and number afterwards if you are able to.</div>",
+        unsafe_allow_html=True,
+    )
+
+    # ---------------- OPTIONAL: location (already set sensibly) ------------
+    with st.container(border=True):
+        st.markdown("<div class='ci-step'>📍 Your location (already set)</div>",
+                    unsafe_allow_html=True)
+        st.markdown(
+            f"""
+            <div style="font-size:13px;color:#37474f;margin-bottom:8px">
+                Sending:
+                <b style="font-family:Consolas,monospace">
+                    {float(st.session_state['citizen_lat']):.6f},
+                    {float(st.session_state['citizen_lon']):.6f}
+                </b>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if st.session_state.get("citizen_gps_note"):
+            st.success(st.session_state["citizen_gps_note"])
+
+        # The reliable, always-works option - used for the defence demonstration.
+        # An on_click callback is used so that pressing it cannot discard the
+        # details the caller has already typed (see _citizen_pick_category).
+        st.button("📍 Use Simulated Enugu Location  (Ogui Road area)",
+                  key="citizen_sim_loc",
+                  on_click=_citizen_use_simulated_location,
+                  **FULL_WIDTH)
+
+        # The real device GPS, handed back to Python through the URL.
+        _geolocation_panel()
+
+        with st.expander("⌨️ Enter the coordinates manually"):
+            st.number_input("Latitude", key="citizen_lat", format="%.6f",
+                            min_value=-90.0, max_value=90.0, step=0.000100)
+            st.number_input("Longitude", key="citizen_lon", format="%.6f",
+                            min_value=-180.0, max_value=180.0, step=0.000100)
+            if not haversine.is_within_command_area(st.session_state["citizen_lat"],
+                                                    st.session_state["citizen_lon"]):
+                st.warning("⚠️ These coordinates are outside the Enugu State Command area.")
+
+    # ---------------- OPTIONAL: who is calling -----------------------------
+    with st.container(border=True):
+        st.markdown(
+            "<div class='ci-step'>👤 Your details "
+            "<span style='font-weight:400;color:#78909c'>(optional)</span></div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "Only so that an officer can call you back. Leave blank and the alert "
+            "is still sent."
+        )
+        st.text_input("Your name", key="citizen_name",
+                      placeholder="e.g. John Doe", autocomplete="name")
+        st.text_input("Your phone number", key="citizen_phone",
+                      placeholder="e.g. 08034567890", autocomplete="tel")
+        st.text_area("Anything else the officers should know", key="citizen_note",
+                     height=70,
+                     placeholder="e.g. Two armed men, one is wearing a black cap...")
+
+
+#: How long after sending an SOS a second press is ignored.
+#:
+#: A frightened caller very often taps the button twice, and Streamlit delivers
+#: a press as a single-run trigger - so this debounce prevents one person's panic
+#: from putting two incidents on the control room's board (and setting off two
+#: alarms).  It also makes the citizen screen safe to double-tap on a phone.
+CITIZEN_DOUBLE_TAP_SECONDS = 8.0
+
+
+def _submit_citizen_sos() -> None:
+    """
+    Write the SOS alert immediately.
+
+    IMPORTANT: nothing is validated as mandatory here.  In a real emergency the
+    only thing that matters is that a location reaches the control room, and the
+    location always has a value.  Name and phone number are recorded when the
+    caller supplied them and marked as not provided otherwise - the officers can
+    still see the incident, find it on the map and dispatch a unit.
+    """
+    # ---- debounce: ignore a second press straight after a successful one ----
+    previous_id = st.session_state.get("citizen_last_alert_id")
+    last_sent = float(st.session_state.get("citizen_last_send_ts") or 0)
+    if previous_id and last_sent and (time.time() - last_sent) < CITIZEN_DOUBLE_TAP_SECONDS:
+        # The alert is already with the Command; just show the tracking screen.
+        return
+
+    name = (st.session_state.get("citizen_name") or "").strip()
+    phone = (st.session_state.get("citizen_phone") or "").strip()
+    note = (st.session_state.get("citizen_note") or "").strip()
+
+    quick = st.session_state.get("citizen_quick")
+    if isinstance(quick, int) and 0 <= quick < len(CITIZEN_QUICK_CATEGORIES):
+        _icon, quick_label, emergency_type, quick_phrase = CITIZEN_QUICK_CATEGORIES[quick]
+    else:
+        quick_label = "Not specified"
+        emergency_type = "Other"
+        quick_phrase = "Emergency of unspecified type"
+
+    try:
+        latitude = float(st.session_state.get("citizen_lat"))
+        longitude = float(st.session_state.get("citizen_lon"))
+    except (TypeError, ValueError):
+        st.session_state["citizen_errors"] = [
+            "Your position could not be read. Please press the SOS button again."
+        ]
+        return
+
+    # Describe the call in the officer's language, starting with what the
+    # caller tapped so it survives even if the type is later reclassified.
+    parts = [f"SOS raised from the Citizens' SOS app. Reported as: {quick_phrase}."]
+    if note:
+        parts.append(note)
+    if not name and not phone:
+        parts.append("Caller did not leave a name or call-back number.")
+    description = " ".join(parts)
+
+    ok, message, alert_id = create_alert(
+        {
+            "citizen_name": name or "Unknown caller",
+            "phone_number": phone or "Not provided",
+            "latitude": latitude,
+            "longitude": longitude,
+            "emergency_type": emergency_type,
+            "description": description,
+            "status": "Active",
+        },
+        actor=f"citizen:{name}" if name else "citizen:app",
+    )
+
+    if not ok:
+        st.session_state["citizen_errors"] = [message]
+        return
+
+    # Remember which alert this phone created so we can track its progress.
+    st.session_state["citizen_last_alert_id"] = alert_id
+    st.session_state["citizen_last_send_ts"] = time.time()
+    # Keep the caller's details outside the widget keys so they are still there
+    # for a second SOS (this run ends with st.rerun(), which resets the inputs).
+    st.session_state["citizen_saved_name"] = name
+    st.session_state["citizen_saved_phone"] = phone
+    st.session_state["citizen_sent_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state["citizen_beep_pending"] = True
+    st.session_state["citizen_quick_label"] = quick_label
+    st.session_state.pop("citizen_errors", None)
+
+
+def _citizen_tracking_body() -> None:
+    """Live status panel - re-runs every 3 seconds so the citizen sees progress."""
+    alert_id = st.session_state.get("citizen_last_alert_id")
+    alert = get_alert(int(alert_id)) if alert_id else None
+
+    if not alert:
+        st.warning("Your alert could not be found. Please send a new SOS.")
+        return
+
+    status = alert["status"]
+    meta = STATUS_META.get(status, {"colour": "#424242", "icon": "🔵"})
+
+    assigned = None
+    if alert.get("assigned_unit_id"):
+        assigned = safe_fetch_one(
+            "SELECT * FROM patrol_units WHERE unit_id = ?", (alert["assigned_unit_id"],),
+            "the responding unit",
+        )
+
+    if status == "Active":
+        headline = "Your SOS has reached the control room"
+        detail = ("A dispatcher is looking at your location now. "
+                  "Keep this screen open and keep your phone line free.")
+    elif status == "Dispatched":
+        headline = "A patrol unit has been dispatched to you"
+        detail = ("Stay where you are if it is safe to do so. "
+                  "The officers are on their way to your GPS position.")
+    elif status == "Resolved":
+        headline = "This incident has been marked as resolved"
+        detail = "If you still need help, send a new SOS immediately."
+    else:
+        headline = "This alert was closed as a false alarm"
+        detail = "If this was a mistake, please send a new SOS."
+
+    st.markdown(
+        f"""
+        <div class="ci-track" style="border-left-color:{meta['colour']}">
+            <div class="label">Live status · updates every 3 seconds</div>
+            <div class="value">{meta['icon']} {html_lib.escape(status)}</div>
+            <div style="font-size:13.5px;color:#37474f;margin-top:8px">{html_lib.escape(headline)}</div>
+            <div style="font-size:12.5px;color:#607d8b;margin-top:5px">{html_lib.escape(detail)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    cols = st.columns(2)
+    with cols[0]:
+        st.markdown(
+            f"""
+            <div class="ci-track">
+                <div class="label">Incident number</div>
+                <div class="value">SOS-{int(alert['alert_id']):05d}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with cols[1]:
+        st.markdown(
+            f"""
+            <div class="ci-track">
+                <div class="label">Emergency type</div>
+                <div class="value">{TYPE_ICON.get(alert['emergency_type'], '📞')}
+                    {html_lib.escape(str(alert['emergency_type']))}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    if assigned:
+        distance = haversine.calculate_distance(
+            alert["latitude"], alert["longitude"],
+            assigned["current_lat"], assigned["current_long"],
+        )
+        eta = haversine.estimate_arrival_time(distance)
+        st.markdown(
+            f"""
+            <div class="ci-track" style="border-left-color:#2e7d32">
+                <div class="label">Responding unit</div>
+                <div class="value">🚔 {html_lib.escape(str(assigned['unit_callsign']))}</div>
+                <div style="font-size:13px;color:#37474f;margin-top:5px">
+                    Officer: {html_lib.escape(str(assigned['officer_name']))}<br>
+                    Distance from you: <b>{distance:.2f} km</b> ·
+                    Estimated arrival: <b>{haversine.format_eta(eta)}</b>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <div class="ci-track" style="border-left-color:#ef6c00">
+                <div class="label">Responding unit</div>
+                <div class="value">🕒 Being assigned</div>
+                <div style="font-size:12.5px;color:#607d8b;margin-top:5px">
+                    The nearest available patrol unit is being alerted.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+if hasattr(st, "fragment"):
+    _citizen_tracking_live = st.fragment(run_every=ALARM_REFRESH_SECONDS)(_citizen_tracking_body)
+else:  # pragma: no cover - older Streamlit builds
+    _citizen_tracking_live = _citizen_tracking_body
+
+
+def _citizen_success_screen() -> None:
+    """Confirmation screen shown immediately after the SOS is saved."""
+    alert_id = st.session_state.get("citizen_last_alert_id")
+    alert = get_alert(int(alert_id)) if alert_id else None
+    if not alert:
+        st.session_state.pop("citizen_last_alert_id", None)
+        st.rerun()
+        return
+
+    # ---- the confirmation chime (plays once, on this phone) ---------------
+    if st.session_state.get("citizen_beep_pending"):
+        st.session_state["citizen_beep_pending"] = False
+        beep = sound_bytes("beep")
+        if beep:
+            st.audio(beep, format="audio/wav", autoplay=True)
+            kick_html_audio()
+
+    st.markdown(
+        f"""
+        <div class="ci-success">
+            <div class="big">🚨</div>
+            <h2>SOS SENT!</h2>
+            <p style="font-size:16px;font-weight:600">Help is on the way. Stay calm.</p>
+            <p>Your distress call has reached the Enugu State Police Command control room.</p>
+            <div style="margin-top:14px;font-size:13px;color:#f1f8e9">
+                Incident ID <b>SOS-{int(alert['alert_id']):05d}</b> ·
+                {html_lib.escape(str(alert['emergency_type']))} ·
+                sent {html_lib.escape(format_timestamp(alert['created_at']))}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.container(border=True):
+        st.markdown("<div class='ci-step'>What happens now</div>", unsafe_allow_html=True)
+        st.markdown(
+            """
+            1. The control room dashboard **rings an alarm** and shows your exact position on the map.
+            2. The system **calculates which patrol unit is nearest** to you.
+            3. The nearest unit is **dispatched to your GPS coordinates**.
+            4. This screen updates automatically so you can see the officer's arrival time.
+            """
+        )
+
+    _citizen_tracking_live()
+
+    # ---------------- OPTIONAL: add details AFTER the alert is already sent --
+    # The alert is already with the control room.  Anything here simply
+    # improves the record, so a caller who is hiding, running or injured can
+    # ignore it completely.
+    current_name = str(alert.get("citizen_name") or "")
+    current_phone = str(alert.get("phone_number") or "")
+    already_given = current_name not in ("", "Unknown caller") or current_phone not in ("", "Not provided")
+
+    with st.container(border=True):
+        st.markdown(
+            "<div class='ci-step'>➕ Add your details "
+            "<span style='font-weight:400;color:#78909c'>(optional)</span></div>",
+            unsafe_allow_html=True,
+        )
+        if already_given:
+            st.caption("So far the Command has: "
+                       f"**{html_lib.escape(current_name)}** · "
+                       f"**{html_lib.escape(current_phone)}**. "
+                       "You can still correct it below.")
+        else:
+            st.caption(
+                "Only if you are able to. Giving an officer a number to call back "
+                "makes it faster — but your SOS has already been sent."
+            )
+
+        with st.form("citizen_add_details", clear_on_submit=False):
+            add_name = st.text_input("Your name", value="" if current_name == "Unknown caller" else current_name)
+            add_phone = st.text_input("Phone number",
+                                      value="" if current_phone == "Not provided" else current_phone)
+            if st.form_submit_button("💾 Send these details to the Command", **FULL_WIDTH):
+                try:
+                    db.execute_query(
+                        """
+                        UPDATE sos_alerts
+                        SET citizen_name = ?, phone_number = ?
+                        WHERE alert_id = ?
+                        """,
+                        (add_name.strip() or "Unknown caller",
+                         add_phone.strip() or "Not provided",
+                         int(alert["alert_id"])),
+                    )
+                    db.log_activity(
+                        "ALERT_UPDATED",
+                        f"Citizen supplied further details for SOS-{int(alert['alert_id']):05d}",
+                        actor="citizen:app",
+                        alert_id=int(alert["alert_id"]),
+                    )
+                    # keep them for any future SOS from this phone
+                    st.session_state["citizen_name"] = add_name.strip()
+                    st.session_state["citizen_phone"] = add_phone.strip()
+                    notify("success", "Details sent to the control room.")
+                    st.rerun()
+                except db.DatabaseError as exc:
+                    st.error(f"⛔ Could not save your details: {exc}")
+
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+    if st.button("🏠 Back to the SOS home screen", key="citizen_back", **FULL_WIDTH):
+        st.session_state.pop("citizen_last_alert_id", None)
+        st.session_state.pop("citizen_gps_note", None)
+        st.session_state["citizen_last_send_ts"] = 0
+        st.session_state["citizen_note"] = ""
+        st.rerun()
+
+
+def render_citizen_app() -> None:
+    """Entry point for MODE 1 - the Citizen SOS app."""
+    st.markdown(CITIZEN_CSS, unsafe_allow_html=True)
+
+    st.markdown(
+        """
+        <div class="ci-head">
+            <div class="crest">🚨</div>
+            <h2>Enugu State Police — SOS</h2>
+            <div class="sub">NIGERIA POLICE FORCE · EMERGENCY RESPONSE</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.session_state.get("citizen_last_alert_id"):
+        _citizen_success_screen()
+    else:
+        _citizen_form_screen()
+
+
+# =================================================================================
+# 18. MODE 2 — THE POLICE ALARM SYSTEM (auto-refresh + ringing + flashing border)
+# =================================================================================
+def _ensure_alarm_state() -> None:
+    """
+    Prepare the alarm bookkeeping for this officer's session.
+
+    ``alarm_baseline_max`` records the highest alert id that existed when the
+    officer signed in.  Anything above it is unambiguously a NEW arrival, so
+    signing in never sets the alarm off for old incidents.
+    """
+    if "alarm_baseline_max" not in st.session_state:
+        try:
+            st.session_state["alarm_baseline_max"] = int(
+                db.fetch_scalar("SELECT COALESCE(MAX(alert_id), 0) FROM sos_alerts",
+                                default=0) or 0
+            )
+        except db.DatabaseError:
+            st.session_state["alarm_baseline_max"] = 0
+    if "alarm_acknowledged" not in st.session_state:
+        st.session_state["alarm_acknowledged"] = set()
+
+
+def alarm_snapshot() -> tuple[list[dict], list[dict]]:
+    """
+    Return ``(pending, ringing)``.
+
+    pending
+        Active alerts this officer has not yet acknowledged - these are shown in
+        the "NEW EMERGENCY" banner.
+    ringing
+        The subset that should actually make a noise: either a genuinely new
+        arrival (alert_id above the sign-in baseline) or a very recent one
+        (raised within ALARM_FRESH_MINUTES), which covers a citizen sending the
+        SOS moments before the officer signs in.
+    """
+    _ensure_alarm_state()
+
+    rows = db.fetch_all(
+        "SELECT * FROM sos_alerts WHERE status = 'Active' ORDER BY alert_id DESC"
+    )
+    acknowledged = st.session_state.get("alarm_acknowledged") or set()
+    baseline = int(st.session_state.get("alarm_baseline_max") or 0)
+
+    pending = [row for row in rows if int(row["alert_id"]) not in acknowledged]
+    ringing = [
+        row for row in pending
+        if int(row["alert_id"]) > baseline
+        or alert_age_minutes(row.get("created_at")) <= ALARM_FRESH_MINUTES
+    ]
+    return pending, ringing
+
+
+def _render_flashing_border() -> None:
+    """Draw the flashing red frame around the whole dashboard."""
+    st.markdown(
+        """
+        <div class="sos-flash-frame"></div>
+        <style>
+            .sos-flash-frame {
+                position: fixed; inset: 0; pointer-events: none; z-index: 99999;
+                border: 11px solid #ff1744;
+                box-shadow: inset 0 0 70px rgba(255, 23, 68, .55);
+                animation: sosFlash .75s steps(1) infinite;
+            }
+            @keyframes sosFlash {
+                0%, 49%   { opacity: 1;   border-color: #ff1744; }
+                50%, 100% { opacity: .12; border-color: #ff1744; }
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_new_emergency_banner(alert: dict, ringing: bool) -> None:
+    """The big banner naming the citizen, the emergency type and the location."""
+    if ringing:
+        background = "linear-gradient(90deg,#b71c1c 0%,#e53935 60%,#ff5252 100%)"
+        title = "🚨 NEW EMERGENCY! 🚨"
+        pulse = "animation: sosBannerPulse 1s infinite;"
+    else:
+        background = "linear-gradient(90deg,#e65100 0%,#ef6c00 60%,#fb8c00 100%)"
+        title = "⚠️ ACTIVE EMERGENCY AWAITING ATTENTION"
+        pulse = ""
+
+    st.markdown(
+        f"""
+        <style>@keyframes sosBannerPulse {{
+            0%   {{ box-shadow: 0 0 0 0 rgba(183,28,28,.7); }}
+            70%  {{ box-shadow: 0 0 0 18px rgba(183,28,28,0); }}
+            100% {{ box-shadow: 0 0 0 0 rgba(183,28,28,0); }}
+        }}</style>
+        <div style="background:{background};color:#fff;border-radius:12px;
+                    padding:16px 20px;margin-bottom:12px;{pulse}
+                    box-shadow:0 6px 20px rgba(183,28,28,.4)">
+            <div style="font-size:13px;font-weight:800;letter-spacing:2.5px">{title}</div>
+            <div style="font-size:24px;font-weight:800;margin-top:6px;line-height:1.25">
+                {TYPE_ICON.get(alert['emergency_type'], '📞')}
+                {html_lib.escape(str(alert['emergency_type']))}
+                &nbsp;·&nbsp; {html_lib.escape(str(alert['citizen_name']))}
+            </div>
+            <div style="font-size:14px;margin-top:8px;color:#ffe4e1">
+                📞 {html_lib.escape(str(alert['phone_number']))}
+                &nbsp;&nbsp;|&nbsp;&nbsp;
+                📍 {float(alert['latitude']):.6f}, {float(alert['longitude']):.6f}
+                &nbsp;&nbsp;|&nbsp;&nbsp;
+                🕒 received {html_lib.escape(rel_time(alert['created_at']))}
+                &nbsp;&nbsp;|&nbsp;&nbsp;
+                🆔 SOS-{int(alert['alert_id']):05d}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_alarm_nearest_units(alert: dict) -> None:
+    """Show the three nearest patrol units inside the alarm panel."""
+    try:
+        units = load_units()
+    except db.DatabaseError:
+        return
+
+    ranked = haversine.find_nearest_units(
+        alert["latitude"], alert["longitude"], units, top_n=3, available_only=True
+    )
+    if not ranked:
+        st.warning("No patrol unit is currently available for dispatch.")
+        return
+
+    section_title("🧭 Nearest available patrol units (calculated automatically)")
+    medals = ["🥇", "🥈", "🥉"]
+    columns = st.columns(len(ranked))
+    for index, match in enumerate(ranked):
+        with columns[index]:
+            st.markdown(
+                f"""
+                <div class="info-card rank{min(index + 1, 3)}">
+                    <div class="callsign">{medals[index]} {html_lib.escape(str(match['unit_callsign']))}</div>
+                    <div class="officer">👮 {html_lib.escape(str(match['officer_name']))}</div>
+                    <div class="stats">
+                        📏 <b>{match['distance_km']:.2f} km</b> away<br>
+                        ⏱️ ETA <b>{html_lib.escape(match['eta_text'])}</b>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def _alarm_monitor_body() -> None:
+    """
+    The police alarm monitor - re-runs every ALARM_REFRESH_SECONDS.
+
+    It is rendered on EVERY police page, so the alarm finds the officer wherever
+    they are in the dashboard.
+    """
+    if not auth.is_authenticated():
+        return
+
+    try:
+        pending, ringing = alarm_snapshot()
+    except db.DatabaseError as exc:
+        st.warning(f"⚠️ Could not poll for new SOS alerts: {exc}")
+        return
+
+    # ---- a brand new arrival: refresh the WHOLE page once ---------------
+    # The monitor itself re-runs every 3 seconds, but the rest of the page
+    # (the overview map, the KPI cards, the alert register) only redraws on a
+    # full application re-run.  When a genuinely new alert appears we therefore
+    # trigger exactly one full re-run, guarded by _alarm_last_broadcast so it
+    # can never loop.
+    newest_id = int(ringing[0]["alert_id"]) if ringing else 0
+    if newest_id and newest_id != int(st.session_state.get("_alarm_last_broadcast") or 0):
+        st.session_state["_alarm_last_broadcast"] = newest_id
+        st.rerun(scope="app")
+
+    # ---- the manual "test alarm" diagnostic ------------------------------
+    testing = time.time() < float(st.session_state.get("alarm_test_until") or 0)
+    alarm_on = bool(ringing) or testing
+
+    focus_alert = ringing[0] if ringing else (pending[0] if pending else None)
+
+    # ---- SOUND + FLASHING BORDER ----------------------------------------
+    if alarm_on:
+        _render_flashing_border()
+        alarm_wav = sound_bytes("alarm")
+        if alarm_wav:
+            # loop=True keeps ringing until the alert is acknowledged or the
+            # element disappears from the page.
+            st.audio(alarm_wav, format="audio/wav", autoplay=True, loop=True)
+            kick_html_audio()
+
+    # ---- BANNER ----------------------------------------------------------
+    if focus_alert is not None:
+        _render_new_emergency_banner(focus_alert, ringing=bool(ringing))
+
+        if len(pending) > 1:
+            st.caption(f"ℹ️ {len(pending)} active SOS alerts are awaiting acknowledgement.")
+
+        # ---- the three nearest units -------------------------------------
+        _render_alarm_nearest_units(focus_alert)
+
+        # ---- action buttons ----------------------------------------------
+        action_left, action_mid, action_right, action_last = st.columns([1, 1.15, 1, 1])
+
+        with action_left:
+            if st.button("🔔 Silence Alarm", key="alarm_silence", type="primary", **FULL_WIDTH):
+                acknowledged = set(st.session_state.get("alarm_acknowledged") or set())
+                acknowledged.update(int(row["alert_id"]) for row in pending)
+                st.session_state["alarm_acknowledged"] = acknowledged
+                st.session_state["alarm_test_until"] = 0
+                db.log_activity(
+                    "ALARM_SILENCED",
+                    f"Alarm silenced by {auth.current_username()} "
+                    f"({len(pending)} active alert(s) acknowledged)",
+                    actor=auth.current_username(),
+                    alert_id=int(focus_alert["alert_id"]),
+                )
+                st.rerun(scope="app")
+
+        with action_mid:
+            if st.button("📲 Mark as Dispatched", key="alarm_dispatch", **FULL_WIDTH,
+                         help="Sends the nearest available patrol unit and stops the alarm."):
+                _dispatch_nearest_from_alarm(focus_alert)
+
+        with action_right:
+            if st.button("🎭 DEMO MODE", key="alarm_demo", **FULL_WIDTH,
+                         help="Injects a simulated incoming SOS alert - your backup if the "
+                              "live phone demonstration fails."):
+                _inject_demo_alert()
+
+        with action_last:
+            if st.button("🗺️ Open live map", key="alarm_map", **FULL_WIDTH):
+                nav_callback("🗺️ Live SOS Map",
+                             {"focus_alert_id": int(focus_alert["alert_id"])})
+                st.rerun(scope="app")
+
+    else:
+        # ---- quiet state ---------------------------------------------------
+        beats = st.columns([2.6, 1, 1])
+        with beats[0]:
+            st.markdown(
+                """
+                <div style="border:1px solid #c8e6c9;background:#f1f8e9;border-radius:10px;
+                            padding:9px 14px;font-size:13px;color:#2e7d32;font-weight:600">
+                    ✅ Control room quiet — no unacknowledged SOS alerts.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with beats[1]:
+            if st.button("🔔 Test alarm", key="alarm_test", **FULL_WIDTH,
+                         help="Plays the ringing alarm for a few seconds to check the speakers."):
+                st.session_state["alarm_test_until"] = time.time() + ALARM_TEST_SECONDS
+                st.rerun(scope="app")
+        with beats[2]:
+            if st.button("🎭 DEMO MODE", key="alarm_demo_quiet", **FULL_WIDTH,
+                         help="Injects a simulated incoming SOS alert."):
+                _inject_demo_alert()
+
+    st.caption(
+        f"📡 Monitoring for new SOS alerts every {ALARM_REFRESH_SECONDS} seconds · "
+        f"last check {datetime.utcnow().strftime('%H:%M:%S')} UTC · "
+        f"citizen app writes to the same database file"
+    )
+
+
+def _dispatch_nearest_from_alarm(alert: dict) -> None:
+    """Send the nearest available patrol unit to the alert and stop the alarm."""
+    try:
+        units = load_units()
+        ranked = haversine.find_nearest_units(
+            alert["latitude"], alert["longitude"], units, top_n=1, available_only=True
+        )
+        if not ranked:
+            notify("error", "No patrol unit is available. Bring a unit back online first.")
+            st.rerun(scope="app")
+            return
+
+        ok, message = dispatch_unit(int(alert["alert_id"]), ranked[0]["unit_id"],
+                                    actor=auth.current_username())
+
+        acknowledged = set(st.session_state.get("alarm_acknowledged") or set())
+        acknowledged.add(int(alert["alert_id"]))
+        st.session_state["alarm_acknowledged"] = acknowledged
+        st.session_state["alarm_test_until"] = 0
+        st.session_state["focus_alert_id"] = int(alert["alert_id"])
+
+        notify("success" if ok else "error", message)
+        st.rerun(scope="app")
+    except db.DatabaseError as exc:
+        notify("error", str(exc))
+        st.rerun(scope="app")
+
+
+def _inject_demo_alert() -> None:
+    """DEMO MODE: inject a realistic incoming SOS call as a backup."""
+    ok, message, alert_id = simulate_incoming_alert(auth.current_username())
+    if ok and alert_id:
+        st.session_state["focus_alert_id"] = int(alert_id)
+        # Make sure the new alert is treated as a fresh arrival so it rings.
+        acknowledged = set(st.session_state.get("alarm_acknowledged") or set())
+        acknowledged.discard(int(alert_id))
+        st.session_state["alarm_acknowledged"] = acknowledged
+        notify("error", f"🎭 DEMO SOS injected — {message}")
+    else:
+        notify("error", message)
+    st.rerun(scope="app")
+
+
+if hasattr(st, "fragment"):
+    _alarm_monitor = st.fragment(run_every=ALARM_REFRESH_SECONDS)(_alarm_monitor_body)
+else:  # pragma: no cover - older Streamlit builds
+    _alarm_monitor = _alarm_monitor_body
+
+
+# =================================================================================
+# 19. NAVIGATION & APPLICATION ENTRY POINT
 # =================================================================================
 PAGE_REGISTRY = {
     "📊 Command Dashboard": page_dashboard,
@@ -2751,9 +4012,13 @@ def ensure_database() -> bool:
     """
     Guarantee that the database exists before the UI is drawn.
 
-    If ``data/sos_database.db`` is missing (for example on a fresh clone
-    or on Streamlit Community Cloud), the schema is created and seeded
-    automatically so the demonstration never fails to start.
+    If ``data/sos_emergency.db`` is missing (for example on a fresh clone or on
+    Streamlit Community Cloud), the schema is created and seeded automatically
+    so the demonstration never fails to start.
+
+    The same function is used by BOTH modes, which is what guarantees that the
+    citizen app and the police dashboard are reading and writing one shared
+    database file.
     """
     try:
         if not db.database_exists():
@@ -2775,21 +4040,23 @@ def ensure_database() -> bool:
         return False
 
 
-def main() -> None:
-    """Application entry point."""
-    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+def render_police_shell() -> None:
+    """
+    MODE 2 shell: sign-in gate, sidebar, alarm monitor and the selected page.
 
-    if not ensure_database():
-        return
-
-    # ---------------- authentication gate ---------------------------------
+    The alarm monitor is deliberately drawn BEFORE the page body so that the
+    ringing alarm, the flashing border and the "NEW EMERGENCY" banner appear at
+    the top of whichever page the officer happens to be on.
+    """
     if not auth.is_authenticated():
         render_login()
         return
 
-    # ---------------- authenticated shell ---------------------------------
     flush_toasts()
     selected_page = render_sidebar()
+
+    # --- the live alarm watch (re-runs every ALARM_REFRESH_SECONDS) ---------
+    _alarm_monitor()
 
     try:
         PAGE_REGISTRY[selected_page]()
@@ -2814,6 +4081,50 @@ def main() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def main() -> None:
+    """
+    Application entry point - dispatches to one of the TWO modes.
+
+        MODE 1  Citizen SOS App     (no login, mobile-shaped panic button)
+        MODE 2  Police Command      (login required, live alarm + all dashboards)
+
+    Both run from this single script and share one SQLite database file.
+    """
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+    if not ensure_database():
+        return
+
+    # Sound files are synthesised once, on first run, with no internet needed.
+    try:
+        sounds.ensure_sounds()
+    except Exception:  # noqa: BLE001 - sound must never block the application
+        pass
+
+    # ---------------- MODE SWITCHER (visible before login) -----------------
+    mode = render_mode_switcher()
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+
+    if mode == MODE_CITIZEN:
+        # ---------------- MODE 1: CITIZEN SOS (no login) -------------------
+        try:
+            render_citizen_app()
+        except db.DatabaseError as exc:
+            st.error(f"⛔ The SOS could not be processed. {exc}")
+            st.caption("Please try again, or call the Command on 112.")
+        except Exception as exc:  # noqa: BLE001
+            st.error("⛔ An unexpected error occurred.")
+            with st.expander("Technical details (for troubleshooting)"):
+                import traceback
+
+                st.code(traceback.format_exc(), language="text")
+            st.caption(f"Error summary: {exc}")
+        return
+
+    # ---------------- MODE 2: POLICE COMMAND (login required) --------------
+    render_police_shell()
 
 
 if __name__ == "__main__":

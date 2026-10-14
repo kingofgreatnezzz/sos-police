@@ -5,14 +5,20 @@ REM  Nigeria Police Force - Enugu State Command
 REM ----------------------------------------------------------------------------
 REM  setup_and_start.bat
 REM
+REM  ONE server, TWO modes:
+REM     MODE 1  Citizen SOS App    (no login, mobile panic button)
+REM     MODE 2  Police Command     (login required, live alarm + dashboards)
+REM  Both are served by this single script and share one SQLite database.
+REM
 REM  This script performs a complete, hands-free start-up:
 REM     1. Chooses the Python interpreter to use
 REM     2. Reuses an existing virtual environment if one is available,
 REM        otherwise creates a new one in .\venv
 REM     3. Installs every dependency listed in requirements.txt
 REM     4. Creates and seeds the SQLite database (setup_db.py)
-REM     5. Starts the Streamlit command dashboard
-REM     6. Opens the browser at the dashboard address
+REM     5. Generates the alarm and confirmation sounds (sounds.py)
+REM     6. Starts the Streamlit server
+REM     7. Opens BOTH modes in the browser
 REM
 REM  Interpreter priority
 REM     a) The virtual environment that is already activated in this window
@@ -38,7 +44,9 @@ set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 set "SHARED_ENV=%PROJECT_DIR%..\myenv"
 set "SHARED_PY=%SHARED_ENV%\Scripts\python.exe"
 set "APP_PORT=8501"
-set "APP_URL=http://localhost:%APP_PORT%"
+set "BASE_URL=http://localhost:%APP_PORT%"
+set "POLICE_URL=%BASE_URL%/?mode=police"
+set "CITIZEN_URL=%BASE_URL%/?mode=citizen"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 
@@ -57,7 +65,8 @@ echo      A Case Study of the Nigeria Police Force, Enugu State Command
 echo ============================================================================
 echo.
 echo   Project folder : %PROJECT_DIR%
-echo   Dashboard URL  : %APP_URL%
+echo   Police Command : %POLICE_URL%
+echo   Citizen SOS    : %CITIZEN_URL%
 echo.
 
 REM ============================================================================
@@ -76,11 +85,15 @@ if not exist "%PROJECT_DIR%run_server.bat" (
     echo [ERROR] run_server.bat was not found in this folder.
     goto :fatal
 )
+if not exist "%PROJECT_DIR%setup_db.py" (
+    echo [ERROR] setup_db.py was not found in this folder.
+    goto :fatal
+)
 
 REM ============================================================================
 REM  STEP 2 - choose the Python interpreter
 REM ============================================================================
-echo [1/6] Choosing the Python interpreter...
+echo [1/7] Choosing the Python interpreter...
 
 set "RUN_PY="
 set "ENV_KIND="
@@ -170,7 +183,7 @@ if errorlevel 1 (
 REM ============================================================================
 REM  STEP 3 - install the dependencies
 REM ============================================================================
-echo [2/6] Installing dependencies (this may take a few minutes on the first run)...
+echo [2/7] Installing dependencies (this may take a few minutes on the first run)...
 "%RUN_PY%" -m pip install -r "%PROJECT_DIR%requirements.txt" --disable-pip-version-check
 if errorlevel 1 (
     echo.
@@ -182,7 +195,7 @@ if errorlevel 1 (
 )
 
 REM ---- verify the critical imports really work --------------------------------
-"%RUN_PY%" -c "import streamlit, pandas, folium, streamlit_folium" >nul 2>&1
+"%RUN_PY%" -c "import streamlit, pandas, folium, streamlit_folium, wave" >nul 2>&1
 if errorlevel 1 (
     echo.
     echo [ERROR] Some required packages still cannot be imported.
@@ -194,7 +207,7 @@ echo       All dependencies are installed and importable.
 REM ============================================================================
 REM  STEP 4 - create and seed the database
 REM ============================================================================
-echo [3/6] Preparing the SQLite database...
+echo [3/7] Preparing the SQLite database (data\sos_emergency.db)...
 if defined RESET_FLAG (
     echo       RESET requested - rebuilding the database from scratch.
     "%RUN_PY%" "%PROJECT_DIR%setup_db.py" --reset
@@ -208,49 +221,92 @@ if errorlevel 1 (
 )
 
 REM ============================================================================
-REM  STEP 5 - make sure the chosen port is free
+REM  STEP 5 - generate the alarm and confirmation sounds
 REM ============================================================================
-echo [4/6] Checking that port %APP_PORT% is available...
+echo [4/7] Preparing the sound files (no internet required)...
+"%RUN_PY%" "%PROJECT_DIR%sounds.py"
+if errorlevel 1 (
+    echo.
+    echo [WARNING] The sound files could not be generated.
+    echo           The dashboard will still work, but the ringing alarm and the
+    echo           citizen confirmation chime will be silent.
+)
+
+REM ============================================================================
+REM  STEP 6 - make sure the chosen port is free
+REM ============================================================================
+echo [5/7] Checking that port %APP_PORT% is available...
 set "PORT_BUSY="
 for /f "tokens=*" %%a in ('netstat -ano ^| findstr /r /c:"LISTENING" ^| findstr /c:":%APP_PORT% "') do set "PORT_BUSY=1"
 
 if defined PORT_BUSY (
     echo       [WARNING] Port %APP_PORT% is already in use.
-    echo       Another copy of the dashboard may already be running.
+    echo       Another copy of the system may already be running.
     echo       Switching to port 8502.
     set "APP_PORT=8502"
-    set "APP_URL=http://localhost:8502"
+    set "BASE_URL=http://localhost:8502"
+    set "POLICE_URL=%BASE_URL%/?mode=police"
+    set "CITIZEN_URL=%BASE_URL%/?mode=citizen"
 )
 
 REM ============================================================================
-REM  STEP 6 - launch the dashboard and open the browser
+REM  STEP 7 - work out this computer's LAN address (so a phone can connect)
 REM ============================================================================
-echo [5/6] Starting the command dashboard...
+set "LAN_IP="
+for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /i "IPv4 Address"') do (
+    if not defined LAN_IP (
+        set "LAN_IP=%%a"
+    )
+)
+if defined LAN_IP set "LAN_IP=%LAN_IP: =%"
+set "PHONE_URL=http://%LAN_IP%:%APP_PORT%/?mode=citizen"
+
+REM ============================================================================
+REM  STEP 8 - launch the server and open both modes
+REM ============================================================================
+echo [6/7] Starting the server (both modes)...
 set "NPF_PYTHON=%RUN_PY%"
 start "NPF Enugu - SOS Command Server" "%PROJECT_DIR%run_server.bat" %APP_PORT%
 
-echo [6/6] Waiting for the server to come up, then opening the browser...
-timeout /t 10 /nobreak >nul
-start "" "%APP_URL%"
+echo [7/7] Waiting for the server, then opening both views...
+timeout /t 12 /nobreak >nul
+
+start "" "%POLICE_URL%"
+timeout /t 3 /nobreak >nul
+start "" "%CITIZEN_URL%"
 
 echo.
 echo ============================================================================
-echo   THE SYSTEM IS NOW RUNNING
+echo   THE SYSTEM IS NOW RUNNING - BOTH MODES
 echo ============================================================================
 echo.
-echo   Dashboard URL : %APP_URL%
+echo   TAB 1  POLICE COMMAND (this computer)
+echo          %POLICE_URL%
+echo          Login: commander / npf123   (full access)
+echo          Login: dispatcher / npf123  (read-only)
 echo.
-echo   LOGIN ACCOUNTS
-echo     Commander  (full access) : commander  / npf123
-echo     Dispatcher (read-only)   : dispatcher / npf123
+echo   TAB 2  CITIZEN SOS APP (this computer - no login needed)
+echo          %CITIZEN_URL%
 echo.
-echo   The dashboard should now be open in your default browser.
-echo   If it did not open, copy the URL above into Chrome, Edge or Firefox.
+if defined LAN_IP (
+    echo   PHONE  CITIZEN SOS APP (open this on a handset on the same Wi-Fi)
+    echo          %PHONE_URL%
+    echo.
+    echo          If the phone cannot connect, allow Python through the Windows
+    echo          Firewall, or run this once in an Administrator Command Prompt:
+    echo            netsh advfirewall firewall add rule name="NPF SOS 8501" ^
+    echo              dir=in action=allow protocol=TCP localport=%APP_PORT%
+    echo.
+)
+echo   DEMONSTRATION ORDER
+echo     1. Tab 1: sign in as commander, stay on the Command Dashboard
+echo     2. Tab 2: fill your name, pick "Armed Robbery", tap the big red button
+echo     3. Tab 1: the alarm RINGS within 3 seconds and a red border flashes
+echo     4. Tab 1: click "Mark as Dispatched" - the ringing stops
 echo.
 echo   To stop the system : close the green "SOS COMMAND SERVER" window,
 echo                        then close this window.
-echo.
-echo   To rebuild the demo data : setup_and_start.bat reset
+echo   To rebuild demo data : setup_and_start.bat reset
 echo.
 echo ============================================================================
 echo.

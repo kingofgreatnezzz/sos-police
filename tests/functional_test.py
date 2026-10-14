@@ -213,6 +213,76 @@ def main() -> int:
     check("delete_alert", ok, message)
     check("alert removed from the register", app.get_alert(alert_id) is None)
 
+    print("\n== I. concurrent writes (citizen app + police dashboard) ==")
+    # Two independent Streamlit sessions mean two independent SQLite
+    # connections to the same database file.  Simulate that with threads.
+    import threading
+    import time as _time
+
+    WRITERS = 5
+    PER_WRITER = 8
+    errors: list[str] = []
+    written: list[int] = []
+    reader_stop = threading.Event()
+    reader_counts: list[int] = []
+    lock = threading.Lock()
+
+    def writer(worker: int) -> None:
+        for index in range(PER_WRITER):
+            try:
+                new_id = db.execute_query(
+                    """INSERT INTO sos_alerts
+                       (citizen_name, phone_number, latitude, longitude,
+                        emergency_type, description, status)
+                       VALUES (?, ?, ?, ?, 'Other', 'concurrency test', 'Active')""",
+                    (f"Concurrent Writer {worker}", f"0800000{worker:02d}{index:02d}",
+                     6.44 + worker * 0.001, 7.50 + index * 0.001),
+                )
+                with lock:
+                    written.append(int(new_id))
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(f"writer {worker}: {exc}")
+
+    def reader() -> None:
+        while not reader_stop.is_set():
+            try:
+                count = int(db.fetch_scalar("SELECT COUNT(*) FROM sos_alerts", default=0) or 0)
+                with lock:
+                    reader_counts.append(count)
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(f"reader: {exc}")
+            _time.sleep(0.01)
+
+    writer_threads = [threading.Thread(target=writer, args=(w,)) for w in range(WRITERS)]
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+    for thread in writer_threads:
+        thread.start()
+    for thread in writer_threads:
+        thread.join()
+    reader_stop.set()
+    reader_thread.join(timeout=2)
+
+    expected = WRITERS * PER_WRITER
+    check(f"{expected} simultaneous INSERTs all succeeded", len(written) == expected,
+          f"{len(written)} written")
+    check("no 'database is locked' failure", not errors, errors[:3])
+    # WAL mode lets the reader keep working while the writers hold the lock.
+    check("reads succeeded while writes were in progress", len(reader_counts) >= 1,
+          f"{len(reader_counts)} successful reads during the write burst")
+
+    if written:
+        placeholders = ",".join("?" for _ in written)
+        db.execute_query(f"DELETE FROM sos_alerts WHERE alert_id IN ({placeholders})",
+                         tuple(written))
+        leftover = db.fetch_scalar(
+            "SELECT COUNT(*) FROM sos_alerts WHERE description = 'concurrency test'",
+            default=0,
+        )
+        check("concurrency test rows cleaned up", int(leftover) == 0, f"{leftover} left")
+
     print(f"\n===== {len(FAILURES)} failure(s) =====")
     for failure in FAILURES:
         print("  FAILED:", failure)

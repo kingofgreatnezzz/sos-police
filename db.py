@@ -21,6 +21,21 @@ Design notes
   browser session in its own ScriptRunner thread.  A single shared
   sqlite3 connection would raise "SQLite objects created in a thread
   can only be used in that same thread".
+
+  This matters a great deal for the TWO-MODE architecture: the Citizen SOS
+  app (phone) and the Police Command dashboard (control-room PC) are two
+  independent Streamlit sessions, so they hold two independent SQLite
+  connections to the SAME database file.
+
+* **Concurrent write safety.**  SQLite runs in WAL (write-ahead logging)
+  journal mode, which allows readers to continue while a writer is active
+  instead of blocking them.  On top of that:
+      - ``PRAGMA busy_timeout`` makes SQLite *wait* rather than fail
+        immediately when another connection holds the write lock, and
+      - every statement is retried a few times on "database is locked",
+        which covers the brief overlap when the citizen app is INSERTing
+        an SOS alert at the very instant the police dashboard is polling.
+
 * ``PRAGMA foreign_keys = ON`` is issued on every new connection so the
   relational integrity between ``sos_alerts`` and ``patrol_units``
   (the dispatch relationship) is genuinely enforced by SQLite.
@@ -33,15 +48,28 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 # ---------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------
 BASE_DIR: Path = Path(__file__).resolve().parent
 DATA_DIR: Path = BASE_DIR / "data"
-DB_PATH: Path = DATA_DIR / "sos_database.db"
+
+#: The single SQLite database shared by BOTH application modes
+#: (Citizen SOS app + Police Command dashboard).
+DB_FILENAME: str = "sos_emergency.db"
+DB_PATH: Path = DATA_DIR / DB_FILENAME
+
+#: Name used by an earlier prototype - migrated automatically on first use.
+LEGACY_DB_PATH: Path = DATA_DIR / "sos_database.db"
+
+# Concurrency tuning
+BUSY_TIMEOUT_MS: int = 8000      # wait up to 8 s for a competing writer
+MAX_RETRIES: int = 5             # retries when the database is briefly locked
+RETRY_DELAY_SECONDS: float = 0.15
 
 # ---------------------------------------------------------------------
 # Thread-local connection cache
@@ -51,6 +79,53 @@ _local = threading.local()
 
 class DatabaseError(Exception):
     """Raised when a database operation fails, with a friendly message."""
+
+
+def _migrate_legacy_database() -> None:
+    """
+    Rename an older ``sos_database.db`` to ``sos_emergency.db`` so that any
+    existing data and accounts are preserved rather than starting afresh.
+    """
+    try:
+        if not DB_PATH.exists() and LEGACY_DB_PATH.exists():
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            LEGACY_DB_PATH.rename(DB_PATH)
+            for suffix in ("-wal", "-shm"):
+                old_side = Path(str(LEGACY_DB_PATH) + suffix)
+                if old_side.exists():
+                    old_side.rename(Path(str(DB_PATH) + suffix))
+    except OSError:
+        # If the rename fails we simply start a fresh database.
+        pass
+
+
+def _is_locked_error(exc: Exception) -> bool:
+    """True when the failure is a transient 'database is locked' condition."""
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
+def _run_with_retry(operation: Callable[[], Any]) -> Any:
+    """
+    Execute a database operation, retrying briefly if the file is locked.
+
+    This is what makes simultaneous writes from the citizen app and the
+    police dashboard safe: instead of raising "database is locked" at the
+    operator, the statement waits a fraction of a second and retries.
+    """
+    last_error: Optional[Exception] = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            if not _is_locked_error(exc):
+                raise
+            last_error = exc
+            time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
+    raise DatabaseError(
+        "The database is busy (another session is writing at the same moment). "
+        "Please try that action again."
+    ) from last_error
 
 
 # ---------------------------------------------------------------------
@@ -76,6 +151,7 @@ def get_connection() -> sqlite3.Connection:
             _local.conn = None
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    _migrate_legacy_database()
     conn = sqlite3.connect(
         str(DB_PATH),
         timeout=15.0,
@@ -84,8 +160,11 @@ def get_connection() -> sqlite3.Connection:
     )
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
+    # WAL lets the citizen app write while the police dashboard is reading.
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA synchronous = NORMAL;")
+    # Wait (rather than fail) when the other session holds the write lock.
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS};")
     _local.conn = conn
     return conn
 
@@ -122,76 +201,105 @@ def execute_query(query: str, params: Sequence[Any] = ()) -> int:
     """
     Run an INSERT / UPDATE / DELETE statement.
 
+    Retries automatically if another session (for example the citizen app)
+    is writing to the database at the same instant.
+
     Returns
     -------
     int
         For INSERT statements -> the new ``lastrowid``.
         For UPDATE / DELETE   -> the number of affected rows.
     """
-    conn = get_connection()
-    try:
+    def operation() -> int:
+        conn = get_connection()
         cur = conn.execute(query, tuple(params))
-        stripped = query.lstrip().upper()
-        if stripped.startswith("INSERT"):
-            return int(cur.lastrowid or 0)
-        return int(cur.rowcount)
+        try:
+            stripped = query.lstrip().upper()
+            if stripped.startswith("INSERT"):
+                return int(cur.lastrowid or 0)
+            return int(cur.rowcount)
+        finally:
+            try:
+                cur.close()
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+    try:
+        return _run_with_retry(operation)
+    except DatabaseError:
+        raise
     except sqlite3.IntegrityError as exc:
         raise DatabaseError(_friendly_integrity_error(exc)) from exc
     except sqlite3.Error as exc:
         raise DatabaseError(f"Database error: {exc}") from exc
-    finally:
-        try:
-            cur.close()
-        except Exception:  # pragma: no cover - defensive
-            pass
 
 
 def execute_many(query: str, param_list: Iterable[Sequence[Any]]) -> int:
     """Run the same statement for many parameter sets. Returns row count."""
-    conn = get_connection()
+    params = [tuple(p) for p in param_list]
+
+    def operation() -> int:
+        conn = get_connection()
+        cur = conn.executemany(query, params)
+        try:
+            return int(cur.rowcount)
+        finally:
+            try:
+                cur.close()
+            except Exception:  # pragma: no cover
+                pass
+
     try:
-        cur = conn.executemany(query, [tuple(p) for p in param_list])
-        return int(cur.rowcount)
+        return _run_with_retry(operation)
+    except DatabaseError:
+        raise
     except sqlite3.IntegrityError as exc:
         raise DatabaseError(_friendly_integrity_error(exc)) from exc
     except sqlite3.Error as exc:
         raise DatabaseError(f"Database error: {exc}") from exc
-    finally:
-        try:
-            cur.close()
-        except Exception:  # pragma: no cover
-            pass
 
 
 def fetch_all(query: str, params: Sequence[Any] = ()) -> list[dict]:
     """Run a SELECT and return every row as a plain dictionary."""
-    conn = get_connection()
-    try:
+    def operation() -> list[dict]:
+        conn = get_connection()
         cur = conn.execute(query, tuple(params))
-        return [dict(row) for row in cur.fetchall()]
+        try:
+            return [dict(row) for row in cur.fetchall()]
+        finally:
+            try:
+                cur.close()
+            except Exception:  # pragma: no cover
+                pass
+
+    try:
+        return _run_with_retry(operation)
+    except DatabaseError:
+        raise
     except sqlite3.Error as exc:
         raise DatabaseError(f"Database error: {exc}") from exc
-    finally:
-        try:
-            cur.close()
-        except Exception:  # pragma: no cover
-            pass
 
 
 def fetch_one(query: str, params: Sequence[Any] = ()) -> Optional[dict]:
     """Run a SELECT and return the first row as a dictionary (or None)."""
-    conn = get_connection()
-    try:
+    def operation() -> Optional[dict]:
+        conn = get_connection()
         cur = conn.execute(query, tuple(params))
-        row = cur.fetchone()
-        return dict(row) if row is not None else None
+        try:
+            row = cur.fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            try:
+                cur.close()
+            except Exception:  # pragma: no cover
+                pass
+
+    try:
+        return _run_with_retry(operation)
+    except DatabaseError:
+        raise
     except sqlite3.Error as exc:
         raise DatabaseError(f"Database error: {exc}") from exc
-    finally:
-        try:
-            cur.close()
-        except Exception:  # pragma: no cover
-            pass
 
 
 def fetch_scalar(query: str, params: Sequence[Any] = (), default: Any = None) -> Any:

@@ -2,29 +2,44 @@
 #  Emergency Response and SOS Location Tracking System
 #  Nigeria Police Force - Enugu State Command
 #
+#  ONE codebase, TWO modes:
+#     MODE 1  Citizen SOS App    - mobile panic button, no login
+#     MODE 2  Police Command     - control-room dashboard with live alarm
+#  Both are served by app.py and share data/sos_emergency.db
+#
 #  Install with:   pip install -r requirements.txt
-#  All packages are free / open-source. SQLite and hashlib are part of the
-#  Python standard library and need no installation.
+#
+#  NO PAID SERVICES AND NO NEW PACKAGES ARE REQUIRED.
+#  The following are used from the Python STANDARD LIBRARY only:
+#     sqlite3   - the database engine (no server to install)
+#     hashlib   - PBKDF2 password hashing
+#     hmac      - constant-time password comparison
+#     math      - the Haversine great-circle distance formula
+#     wave      - generates the alarm and confirmation sounds (sounds.py)
+#     struct    - 16-bit PCM sample packing for those sound files
+#     array     - memory-efficient sample buffers
+#     datetime  - timestamps
 # =============================================================================
 
-# --- Web application framework (the police command dashboard) ----------------
+# --- Web application framework (both modes) -----------------------------------
+# 1.37 is the minimum because the app uses st.fragment(run_every=...) for the
+# 3-second live polling of the alarm monitor and the citizen tracking screen.
 streamlit>=1.37,<2.0
 
 # --- Data handling / tables ---------------------------------------------------
 pandas>=2.0
 
-# --- Interactive maps ---------------------------------------------------------
+# --- Interactive maps (Folium is the Python interface to Leaflet.js) ----------
 folium>=0.15
 streamlit-folium>=0.18
 
-# --- Transitive dependencies pinned loosely for reproducible installs --------
-# (installed automatically, listed here for transparency)
+# --- Transitive dependencies (installed automatically, listed for transparency)
 #   numpy          - required by pandas
 #   jinja2         - required by folium
 #   branca         - required by folium
-#   requests       - required by folium (tile fetching)
+#   requests       - required by folium (map tile fetching)
 #   pillow         - required by streamlit
 #   pyarrow        - required by streamlit dataframes
 #   altair         - required by streamlit charts
-#   tornado        - required by streamlit server
+#   tornado        - required by the streamlit server
 #   protobuf       - required by streamlit

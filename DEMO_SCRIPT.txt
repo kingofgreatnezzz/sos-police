@@ -1,0 +1,564 @@
+================================================================================
+ DEMO SCRIPT — DEFENCE DAY
+ Emergency Response and SOS Location Tracking System
+ A Case Study of the Nigeria Police Force, Enugu State Command
+================================================================================
+
+This file is your step-by-step runbook. Print it and keep it beside the laptop.
+Total demonstration time: 15 minutes (a 7-minute cut-down version is at the end).
+
+--------------------------------------------------------------------------------
+ SECTION 0 — THE STORY YOU ARE TELLING (read this once before the defence)
+--------------------------------------------------------------------------------
+
+Your system now has TWO SIDES, and that is the whole point of the defence:
+
+    SIDE 1  THE CITIZEN   — a phone app with one big red button.
+                            No account, no form-filling under stress. Name,
+                            phone, emergency type and GPS, then one press.
+
+    SIDE 2  THE POLICE    — the command dashboard, which RINGS like a control
+                            room telephone within 3 seconds of that press,
+                            shows the citizen on the map, and has already
+                            calculated which patrol unit is nearest.
+
+    THE LINK              — both sides are the same program and the same
+                            SQLite database. There is no server in between,
+                            no internet service, no subscription.
+
+The sentence to remember:
+
+    "The citizen presses one button and the Command's phone rings — three
+     seconds later the nearest patrol unit has already been calculated."
+
+
+--------------------------------------------------------------------------------
+ SECTION 1 — 30 MINUTES BEFORE: SET-UP CHECKLIST
+--------------------------------------------------------------------------------
+
+ [ ] Laptop plugged into power. Screen mirroring tested.
+ [ ] Close WhatsApp, email, music, and every other application.
+ [ ] Windows notifications OFF  (Settings > System > Focus assist > Alarms only)
+ [ ] Run the launcher to reset the data to a clean, predictable state:
+
+         setup_and_start.bat reset
+
+ [ ] Two browser tabs open automatically. Confirm:
+         Tab 1  Police Command  — the login page appears
+         Tab 2  Citizen SOS     — the big red button appears, NO login
+
+ [ ] In Tab 1 sign in as  commander / npf123  and click through every menu
+     once (this warms the cache so nothing is slow during the demo).
+ [ ] In Tab 1 press "Sign out" again so the demo starts from the login screen.
+ [ ] VOLUME: turn the laptop volume up to about 80% and UNMUTE.
+ [ ] Press the sidebar/logged-in "Test alarm" button once and LISTEN.
+     This also unlocks the browser's audio so the real alarm will play later.
+     >>> DO NOT SKIP THIS. It is the single most important preparation step. <<<
+ [ ] Browser zoom 110% so the panel is readable on the projector.
+ [ ] Phone charged, connected to the SAME Wi-Fi as the laptop.
+     Open the phone URL printed by the launcher, e.g.
+         http://10.82.252.177:8501/?mode=citizen
+ [ ] Test the phone once, then close the tab so the demo starts clean.
+
+ IF THE PHONE WILL NOT CONNECT: run this once in an Administrator Command
+ Prompt, then try again:
+     netsh advfirewall firewall add rule name="NPF SOS 8501" dir=in action=allow protocol=TCP localport=8501
+ You always have Tab 2 as a fallback — the demonstration is identical.
+
+
+--------------------------------------------------------------------------------
+ SECTION 2 — STARTING THE SYSTEM
+--------------------------------------------------------------------------------
+
+ Double-click:   setup_and_start.bat
+
+ The launcher will:
+    1. pick your existing Python environment (it reuses ..\myenv)
+    2. install anything missing
+    3. build and seed data\sos_emergency.db
+    4. generate the two sound files (no internet needed)
+    5. start ONE server that serves BOTH modes
+    6. open Tab 1 (Police Command) and Tab 2 (Citizen SOS)
+    7. print the phone URL for the handset
+
+ Opening the citizen app directly:  http://localhost:8501/?mode=citizen
+ Opening the police dashboard:      http://localhost:8501/?mode=police
+
+
+--------------------------------------------------------------------------------
+ SECTION 3 — THE DEMONSTRATION, STEP BY STEP
+--------------------------------------------------------------------------------
+
+--- STEP 1 · Sign in as the Commander (Tab 1) --------------------------- 1 min
+
+   Type  commander  /  npf123  and press Sign in.
+
+   SAY: "Access is role-based. Passwords are never stored — they are hashed
+         with PBKDF2-HMAC-SHA256, 120 000 iterations and a unique random salt,
+         and compared in constant time to prevent timing attacks."
+
+
+--- STEP 2 · Point at the mode switcher -------------------------------- 30 sec
+
+   Point to the two buttons at the very top of the page:
+       [ CITIZEN SOS ]   [ POLICE COMMAND ]
+
+   SAY: "One program, two front ends, one database. The citizen side needs no
+         login at all — a citizen in distress must never be asked for a
+         password. The Command side is behind the staff sign-in."
+
+
+--- STEP 3 · Show the control room is calm ----------------------------- 30 sec
+
+   Look at the Dashboard. There is a GREEN strip:
+
+       "Control room quiet — no unacknowledged SOS alerts."
+
+   SAY: "The control room is quiet. The system is polling the database every
+         three seconds, waiting."
+
+   >>> This is important: it proves the alarm does NOT ring on login. It only
+       rings for a genuinely new emergency. Examiners notice the difference
+       between a real alerting system and one that just beeps constantly.
+
+
+--- STEP 4 · GO TO THE CITIZEN'S PHONE (Tab 2, or the handset) ---------- 2 min
+
+   Switch to Tab 2 (or pick up the phone).
+
+   SAY: "This is what the citizen sees — no login, no menu, no jargon.
+         But more importantly, look at what is NOT here. There is no form.
+
+         A person whose shop is being robbed at gunpoint is not going to type
+         their name and address. Emergency research is unambiguous on this: every
+         field you require is a delay, and delay costs lives.
+
+         So the design rule is — PRESS FIRST, DETAILS LATER."
+
+   Point at the three one-tap categories:
+
+       [ 🔫 Robbery / Theft ]  [ 🥊 Fight / Attack ]  [ 🚑 Health Emergency ]
+
+   SAY: "Three broad choices instead of five, because a frightened person cannot
+         classify an emergency under pressure. And none of them is compulsory —
+         the button works even if you touch nothing at all."
+
+   >>> DEMONSTRATE THE STRONGEST VERSION FIRST:
+       Press the BIG RED BUTTON *immediately*, with the form completely blank.
+       (Do this before typing anything — it is far more convincing.)
+
+       SAY: "Watch. I have typed nothing. Name is empty. Phone is empty.
+             I have not even chosen a category. I am just pressing the button."
+
+   THEN show what the control room actually received (Step 6).
+
+   >>> THEN, if you want to show the fuller version, go Back and repeat with:
+        a) Tap the category:      [ 🔫 Robbery / Theft ]
+        b) Tap:  "Use Simulated Enugu Location (Ogui Road area)"
+        c) Optionally type your name: John Doe
+
+   Note the coordinates change to 6.452100, 7.508900.
+
+   SAY: "The phone would normally read its own GPS — that button is there and it
+         works — but for a controlled demonstration I am placing the caller at
+         Ogui Road, Enugu, with known coordinates.
+
+         That is deliberate: those coordinates are 0.84 km from the State Police
+         Headquarters, so you can verify the distance calculation against Google
+         Maps yourself."
+
+   * If you have time and the phone has GPS, add:
+     "Watch what happens when I let the phone use its own GPS instead..."
+     (tap '📡 Detect My GPS Location', tap ALLOW) — the page reloads once with
+     the real coordinates. THEN press the simulated-location button again to put
+     it back at Ogui Road for a predictable answer.
+
+
+--- STEP 5 · PRESS THE BIG RED BUTTON ------------------------------ 20 sec
+
+   PAUSE. Let them look at the button.
+
+   SAY: "One button. Nothing else is required to save a life."
+
+   PRESS IT.
+
+   Tab 2 now shows the full-screen green confirmation:
+
+       🚨  SOS SENT!
+       Help is on the way. Stay calm.
+
+   ...and the phone plays a short three-note confirmation chime.
+
+   SAY: "The citizen gets an immediate confirmation, an incident number, and a
+         live tracking screen. They are not left wondering whether it worked.
+
+         And notice what appears BELOW the confirmation — the optional fields.
+         The alert has already gone. Anyone still able to give their name and
+         number can add it now, and it updates the same incident. Press first,
+         details later."
+
+   >>> Double-tap protection: a second press within 8 seconds is ignored, so a
+       panicking caller cannot accidentally create two incidents and set off two
+       alarms. Mention this if asked about robustness.
+
+
+--- STEP 6 · THE ALARM (Tab 1) — THE WOW MOMENT ------------------------ 30 sec
+
+   SWITCH TO TAB 1 IMMEDIATELY. Within three seconds:
+
+       * a thick RED BORDER flashes around the whole dashboard
+       * the RINGING ALARM sounds, continuously
+       * a large red banner appears:
+
+             🚨 NEW EMERGENCY! 🚨
+             📞 Other · Unknown caller
+             📞 Not provided | 📍 6.448300, 7.502300
+             🕒 received just now | 🆔 SOS-00006
+
+   (If you filled the form in instead, the banner shows the citizen's real name,
+    phone number and the Ogui Road coordinates.)
+
+   LET IT RING. Do not talk over it for two seconds. Let them hear it.
+
+   SAY: "The officer did not refresh anything, did not search, did not touch
+         the keyboard. The citizen pressed one button — with nothing filled in —
+         and the Command's phone is ringing three seconds later, with an
+         incident number, a position and a call-back requirement already logged.
+
+         And look at the record itself: the caller is marked as 'Unknown caller'
+         and the number as 'Not provided'. The system does not invent data and it
+         does not refuse the call. It tells the officer exactly what it knows and
+         exactly what it does not know — which is what an operational system must
+         do."
+
+
+--- STEP 7 · The three nearest units, already calculated ---------------- 1 min
+
+   Still on Tab 1, directly under the banner, three cards:
+
+       🥇 PATROL-01-OGUI        ~0.9 km   ETA ~1.5 min
+       🥈 PATROL-04-INDEPENDENCE ~1.0 km  ETA ~1.7 min
+       🥉 PATROL-02-ABAKPA       ~2.5 km  ETA ~4.3 min
+
+   SAY: "Nobody calculated this. The moment the alert arrived the system
+         measured the great-circle distance from the caller to EVERY patrol
+         unit using the Haversine formula, discarded the ones that are already
+         committed or offline, and ranked the rest nearest first.
+
+         The red one is the unit we should send."
+
+   THE SCIENCE — deliver this clearly, it is what earns the marks:
+
+     "The Haversine formula is used because latitude and longitude are angles
+      on a sphere, not flat grid coordinates.
+
+          a = sin^2(delta-phi/2) + cos(phi1)*cos(phi2)*sin^2(delta-lambda/2)
+          c = 2 * atan2(sqrt(a), sqrt(1-a))
+          d = R * c        with R = 6371.0088 km
+
+      I used atan2 rather than asin because it stays numerically stable for
+      both very small and very large distances.
+
+      Validated: the State Police Headquarters to Ogui Road Division computes
+      as 0.843 km, which matches Google Maps to within a few metres.
+
+      The ETA is (km / 40 km/h) * 60 * 1.15 — the 15% is an allowance for
+      traffic lights, potholes and checkpoints here in Enugu."
+
+
+--- STEP 8 · Mark as Dispatched — the alarm stops ----------------------- 30 sec
+
+   Press:   [ 📲 Mark as Dispatched ]
+
+   The ringing STOPS instantly, the red border disappears, and a green toast
+   confirms:
+
+       PATROL-01-OGUI dispatched to SOS-00006. Distance 0.89 km — ETA 1.5 min.
+
+   SAY: "The system sent the NEAREST available unit automatically. The alarm
+         stops because the incident is now being handled — not because anyone
+         pressed a mute button. And note that the unit has been marked as
+         Dispatched in the fleet register at the same time, so it cannot be
+         double-booked to another call. That is a foreign key relationship
+         between the alerts table and the patrol units table, enforced by the
+         database itself."
+
+
+--- STEP 9 · The citizen sees it too (Tab 2) --------------------------- 30 sec
+
+   Switch back to Tab 2 / the phone.
+
+   The tracking screen now reads:
+
+       🚔 A patrol unit has been dispatched to you
+       Responding unit: PATROL-01-OGUI
+       Officer: Sgt. Emeka Okonkwo
+       Distance from you: 0.89 km
+       Estimated arrival: 1.5 min
+
+   SAY: "And the citizen can see it as well — which unit is coming, who the
+         officer is, how far away, and how long. That closes the loop, and it
+         is what reduces the panic and the follow-up phone calls to the
+         control room."
+
+
+--- STEP 10 · The live map ------------------------------------------- 1 min
+
+   Tab 1 > sidebar > "🗺️ Live SOS Map"
+
+   SAY: "Red markers are active emergency calls. Orange are incidents already
+         dispatched. Green are patrol units available right now. Blue are the
+         divisional headquarters. The map itself refreshes automatically, so a
+         dispatcher can leave this on the wall screen."
+
+   Click the new red marker. The popup shows the full call record.
+
+   Optionally switch the layer control to "Satellite imagery".
+
+
+--- STEP 11 · The incident report ------------------------------------ 1 min
+
+   Sidebar > "📄 Incident Report" > choose the Armed Robbery incident.
+
+   SAY: "For the Command diary and for any investigation, the system produces
+         the formal Emergency Response Incident Report on NPF Enugu State
+         Command letterhead: incident ID, time, citizen particulars, GPS
+         coordinates, the description, the response dispatch block with the
+         unit, the distance, the ETA, the responding officer and the total
+         response time, plus a unique authentication code."
+
+   Press:   [ 📄 Download as PDF ]   and open the downloaded file.
+
+   SAY: "That is a real PDF, generated inside the application. No paid
+         library, no external service."
+
+
+--- STEP 12 · Role-based access control ------------------------------ 1 min
+
+   Sidebar > "🚪 Sign out"  >  sign in as  dispatcher / npf123.
+
+   SAY: "This is the Viewer / Dispatcher role — a night-shift operator. Look
+         at what has disappeared: no add, no edit, no delete, no dispatch,
+         and the User Management page is gone from the menu. They can monitor
+         and print, but cannot alter the record. That is separation of duties."
+
+
+--- STEP 13 · Close ------------------------------------------------- 30 sec
+
+   SAY: "To summarise: one codebase, two modes, one database. A citizen presses
+         one button and the Command's phone rings within three seconds, with
+         the nearest patrol unit already calculated. It is built entirely on
+         free and open-source tools — Python, Streamlit, SQLite, Pandas and
+         Folium — with no licensing cost to the Nigeria Police Force, and it
+         runs on an ordinary laptop with no special hardware.
+
+         Future work: a released citizen mobile application, integration with
+         the 112 emergency line, and automatic SMS acknowledgement to the
+         caller. Thank you sir."
+
+
+--------------------------------------------------------------------------------
+ SECTION 4 — ANSWERS TO THE QUESTIONS YOU WILL BE ASKED
+--------------------------------------------------------------------------------
+
+Q: "Why is there no form on the citizen app? Don't you need the details?"
+A: "Deliberately not. Every compulsory field is a delay, and in a robbery or a
+    kidnapping a delay can cost a life. The design rule is press first, details
+    later: the citizen presses one button and the whole incident is raised using
+    the position alone, which is the only thing the Command truly needs to act.
+    Name and phone are then offered as optional fields AFTER the alert is
+    already with the control room. Where the caller cannot supply them, the
+    record says 'Unknown caller' and 'Not provided' rather than inventing data,
+    so the officer can see exactly what is and is not known."
+
+Q: "Why only three categories? Did you not lose information?"
+A: "A frightened person cannot classify an emergency under pressure, so I
+    reduced five classifications to three broad taps: Robbery/Theft,
+    Fight/Attack and Health Emergency. None of them is compulsory either.
+    Those three map onto the five values the database accepts, and the caller's
+    own wording is always preserved in the description field, so an officer can
+    reclassify the incident later without losing what the caller reported."
+
+Q: "What if the caller presses the button twice by mistake?"
+A: "There is an eight-second debounce. A second press while an alert is still
+    fresh returns the caller to their tracking screen instead of raising a
+    second incident, so one panic cannot put two emergencies on the board and
+    set off two alarms."
+
+Q: "How does the phone talk to the dashboard? Is it a real server?"
+A: "Both modes are served by one Streamlit server process from one program.
+    The citizen's press writes a row into the SQLite database; the dashboard
+    polls that same database every three seconds. There is no message broker
+    and no internet dependency — if the Wi-Fi drops, the alarm still rings."
+
+Q: "Is it safe for two people to write at the same time?"
+A: "Yes. SQLite runs in WAL mode, which allows readers while a writer is
+    active, and I set a busy timeout with automatic retries, so a collision
+    waits a fraction of a second instead of failing. I tested it: 40
+    simultaneous inserts from 5 concurrent connections, zero lock errors."
+
+Q: "Why does the alarm not ring when I log in?"
+A: "Because that would be useless. The monitor records the highest alert ID at
+    sign-in; anything above that is a genuinely new arrival. A very recent
+    alert raised within the last 5 minutes still rings, which covers the case
+    where the citizen sends the SOS a moment before the officer signs in."
+
+Q: "Where do the sounds come from? Are they copyrighted?"
+A: "They are generated by the program itself, on first run, using Python's
+    built-in 'wave' module — a three-note chime for the citizen and a
+    telephone-style ringing alarm for the control room. Nothing is downloaded,
+    so there is no copyright issue and no internet dependency."
+
+Q: "Why is the citizen's alert status 'Active' and not 'ACTIVE'?"
+A: "The database enforces a CHECK constraint listing the four permitted
+    statuses — Active, Dispatched, Resolved and False Alarm — so the value
+    must match exactly. That is deliberate: it makes it impossible to store a
+    status the system does not understand."
+
+Q: "What if the GPS is wrong or unavailable?"
+A: "The citizen can override it: the app offers a device-GPS button, a
+    simulated Enugu location button, and manual coordinate entry. A wrong
+    position is still far better than no position, and the dispatcher can see
+    the coordinates on the map before committing a unit."
+
+Q: "How is this different from just calling 112?"
+A: "112 gives you a voice call and the operator has to write down a landmark.
+    This gives the control room a precise coordinate, a categorised emergency
+    type, a named caller with a call-back number, an automatic nearest-unit
+    recommendation, and a permanent audit record — in about three seconds."
+
+Q: "How did you test it?"
+A: "Three automated suites. tests/functional_test.py covers the database,
+    the dispatch lifecycle, the Haversine accuracy against known distances,
+    the PDF structure and concurrent writes. tests/smoke_test_ui.py renders
+    every page in both roles. tests/two_mode_test.py performs the entire
+    demonstration flow — citizen presses SOS, police detects and rings,
+    dispatch stops the alarm. All three pass with zero failures."
+
+Q: "What would you do next?"
+A: "Release the citizen app as a real Android/iOS application with one-tap SOS
+    and offline SMS fallback; integrate the 112 emergency line; add live
+    traffic data for better ETAs; and give each division its own dashboard
+    showing only its area of responsibility."
+
+ IF YOU DO NOT KNOW AN ANSWER:
+    "That is a good question sir. I have not implemented that, but my
+     understanding is ... and I would approach it by ..."
+    Never bluff. A clear "I do not know, but here is how I would find out"
+    scores better than an invented answer.
+
+
+--------------------------------------------------------------------------------
+ SECTION 5 — IF SOMETHING GOES WRONG
+--------------------------------------------------------------------------------
+
+ THE ALARM DOES NOT RING
+   > Most likely the browser is blocking audio because the page has not been
+     clicked yet. Click anywhere on Tab 1 once, then have the citizen press
+     the button again.
+   > Check the laptop volume and that it is not muted.
+   > Click "🔔 Test alarm" on the dashboard — if that is silent, it is the
+     volume or the speakers, not the system.
+   > LAST RESORT: click "🎭 DEMO MODE" on the dashboard. It injects the same
+     kind of alert and the whole flow continues. Say honestly:
+     "Let me use the built-in demo injector, which writes the identical record."
+
+ THE PHONE CANNOT REACH THE LAPTOP
+   > Both devices must be on the same Wi-Fi, and Windows Firewall must allow
+     Python (see the netsh command in Section 1).
+   > Use Tab 2 on the laptop instead and say: "The demonstration is identical;
+     the phone and the second tab are the same client."
+
+ THE BROWSER TAB HAS GONE BLANK OR LOST CONNECTION
+   > Press F5 to reload. Streamlit reconnects automatically and the login
+     session is preserved.
+   > If the green "SOS COMMAND SERVER" window was closed, the server is gone:
+     run setup_and_start.bat again (about 20 seconds).
+
+ PORT 8501 ALREADY IN USE
+   > The launcher switches to 8502 automatically and prints the new URLs.
+
+ THE DATA LOOKS MESSY AFTER EXPERIMENTS
+   > setup_and_start.bat reset   — the database is rebuilt and re-seeded in
+     seconds, and the alarm state is cleared.
+
+ A RED ERROR BOX APPEARS
+   > It is caught by the error handler, not a crash. Note the message, click
+     another menu item, and continue. Do not debug in front of the panel.
+
+ REHEARSE THE RECOVERY ONCE BEFORE THE DAY. Confidence in the recovery is
+ worth more than perfection in the first run.
+
+
+--------------------------------------------------------------------------------
+ SECTION 6 — SHORT ON TIME? THE 7-MINUTE VERSION
+--------------------------------------------------------------------------------
+
+  0:00  Tab 1: sign in as commander. Point at the two mode buttons.
+  0:30  "Control room quiet" — the system is polling every 3 seconds.
+  1:00  Tab 2: do NOT type anything. PRESS THE BIG RED BUTTON immediately.
+  1:30  Show the green "SOS SENT!" screen and the optional details below it.
+        "Press first, details later."
+  2:00  SWITCH TO TAB 1. Let the alarm ring. Say nothing for two seconds.
+  2:20  Banner: incident id, type, coordinates — and the honest "Unknown caller"
+        / "Not provided" labelling.
+  3:00  Three nearest units below the banner.
+  3:30  State the Haversine formula and the 0.843 km validation.
+  4:30  Press [Mark as Dispatched]. The ringing stops.
+  5:00  Tab 2: show that the citizen now sees the responding unit and ETA.
+  5:30  Live SOS Map — red / green / blue markers.
+  6:00  Incident Report — download the PDF and open it.
+  6:30  Sign out, sign in as dispatcher, show that every edit button is gone.
+  7:00  Close with the "free and open-source, no licensing cost" line.
+
+
+--------------------------------------------------------------------------------
+ SECTION 7 — ONE-PAGE CHEAT SHEET (print this bit)
+--------------------------------------------------------------------------------
+
+  URLS      Police :  http://localhost:8501/?mode=police
+            Citizen:  http://localhost:8501/?mode=citizen
+            Phone  :  http://<LAN-IP>:8501/?mode=citizen
+
+  LOGINS    commander  / npf123    full access
+            dispatcher / npf123    read-only
+
+  DEMO      1. Tab 1 sign in      -> quiet, polling every 3 s
+            2. Tab 2 (blank!)     -> PRESS THE BIG RED BUTTON, type nothing
+            3. Tab 2              -> "SOS SENT! Help is on the way."
+            4. Tab 1              -> ALARM + red flashing border + banner
+            5. Tab 1 [Dispatch]   -> alarm stops, unit assigned
+            6. Tab 2              -> shows the unit, distance and ETA
+            (optional repeat: tap [Robbery/Theft] + [Simulated Enugu Location]
+             then press again, to show the fuller record)
+
+  DESIGN    Press first, details later. Nothing on the citizen screen is
+            compulsory - the three category chips are optional too.
+            Three choices only: Robbery/Theft, Fight/Attack, Health Emergency.
+            Second press within 8 s is ignored (double-tap protection).
+            Missing name -> "Unknown caller"; missing phone -> "Not provided".
+
+  NUMBERS   Refresh interval      3 seconds
+            Distance check        0.843 km  (HQ -> Ogui Road Division)
+            Simulated location    6.452100, 7.508900  (Ogui Road)
+            Default location      6.448300, 7.502300  (Command headquarters)
+            Alarm length          6.3 s WAV, looped until acknowledged
+
+  FORMULA   a = sin^2(dp/2) + cos(p1)*cos(p2)*sin^2(dl/2)
+            c = 2*atan2(sqrt(a), sqrt(1-a))
+            d = R * c            R = 6371.0088 km
+            ETA = (km / 40) * 60 * 1.15
+
+  STACK     Python 3.10+ | Streamlit | SQLite (WAL) | Pandas | Folium
+            Security: PBKDF2-HMAC-SHA256, 120 000 iterations, unique salt
+            Sounds: generated locally with the stdlib 'wave' module
+
+  TESTS     python tests\functional_test.py    0 failures
+            python tests\smoke_test_ui.py      0 exceptions
+            python tests\two_mode_test.py      0 failures
+
+  RESET     setup_and_start.bat reset
+
+================================================================================
+ End of demo script. Good luck — you have built something that genuinely works.
+================================================================================
